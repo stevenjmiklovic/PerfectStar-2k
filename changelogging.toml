@@ -1,0 +1,10 @@
+[context]
+name = "PerfectStar 2k"
+version = "0.2.0"
+url = "https://github.com/exarcos/PerfectStar-2k"
+
+[changelog]
+path = "CHANGELOG.md"
+
+[fragments]
+directory = "changes"
