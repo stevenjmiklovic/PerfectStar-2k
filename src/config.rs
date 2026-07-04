@@ -1,0 +1,80 @@
+//! User configuration — the tool adapts to the writer.
+//! `~/.config/perfectstar2k/config.toml` (or the platform equivalent).
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::rtf::ManuscriptFont;
+use crate::theme::Theme;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    /// "wp-blue", "wordstar", or "terminal".
+    pub theme: String,
+    /// How long a prefix key waits before its menu appears.
+    pub menu_delay_ms: u64,
+    /// Seconds of idle time before a dirty buffer autosaves; 0 disables.
+    pub autosave_secs: u64,
+    /// Soft word wrap on startup.
+    pub wrap: bool,
+    /// Wrap margin in columns; 0 wraps at the window width.
+    pub wrap_margin: usize,
+    /// 0 = clean screen (no menus), 1 = delayed menus, 2 = menus + hint bar.
+    pub help_level: u8,
+    /// Underline misspelled words on startup.
+    pub spellcheck: bool,
+    /// Keep the current line pinned at a fixed row and scroll the document
+    /// under it, instead of only scrolling once the cursor hits the edge.
+    pub typewriter: bool,
+    /// Body font for `^KM` manuscript RTF export: "times" or "courier".
+    pub manuscript_font: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            theme: String::from("wp-blue"),
+            menu_delay_ms: 700,
+            autosave_secs: 60,
+            wrap: true,
+            wrap_margin: 0,
+            help_level: 1,
+            spellcheck: true,
+            typewriter: false,
+            manuscript_font: String::from("times"),
+        }
+    }
+}
+
+fn config_path() -> Option<PathBuf> {
+    Some(dirs::config_dir()?.join("perfectstar2k").join("config.toml"))
+}
+
+impl Config {
+    pub fn load() -> Self {
+        let Some(path) = config_path() else {
+            return Config::default();
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(data) => toml::from_str(&data).unwrap_or_default(),
+            Err(_) => Config::default(),
+        }
+    }
+
+    pub fn theme(&self) -> Theme {
+        match self.theme.as_str() {
+            "wordstar" => Theme::wordstar(),
+            "terminal" => Theme::terminal_default(),
+            _ => Theme::wp_blue(),
+        }
+    }
+
+    pub fn manuscript_font(&self) -> ManuscriptFont {
+        match self.manuscript_font.as_str() {
+            "courier" => ManuscriptFont::Courier,
+            _ => ManuscriptFont::TimesNewRoman,
+        }
+    }
+}
