@@ -7,6 +7,7 @@ mod keymap;
 mod killring;
 mod markdown;
 mod outline;
+mod pane;
 mod rtf;
 mod search;
 mod session;
