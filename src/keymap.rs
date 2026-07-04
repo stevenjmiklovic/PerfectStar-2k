@@ -77,6 +77,7 @@ pub enum Cmd {
     BlockHide,
     BlockPrev,
     Put,
+    CopyFromOther,
     JumpBlockBegin,
     JumpBlockEnd,
     JumpBlockSource,
@@ -96,6 +97,7 @@ pub enum Cmd {
     ToggleSpellcheck,
     AddToDictionary,
     ToggleTypewriter,
+    OtherWindow,
 }
 
 /// How a command is typed.
@@ -172,6 +174,7 @@ pub const BINDINGS: &[Binding] = &[
     Binding { cmd: Cmd::BlockHide, chord: Pref(K, 'h'), name: "hide/show block" },
     Binding { cmd: Cmd::BlockPrev, chord: Pref(K, 'u'), name: "previous block" },
     Binding { cmd: Cmd::Put, chord: Pref(K, 'p'), name: "put (cycle clippings)" },
+    Binding { cmd: Cmd::CopyFromOther, chord: Pref(K, 'a'), name: "copy block from other window" },
     Binding { cmd: Cmd::Save, chord: Pref(K, 'd'), name: "save" },
     Binding { cmd: Cmd::Save, chord: Pref(K, 's'), name: "save" },
     Binding { cmd: Cmd::SaveExit, chord: Pref(K, 'x'), name: "save & exit" },
@@ -187,6 +190,7 @@ pub const BINDINGS: &[Binding] = &[
     Binding { cmd: Cmd::ToggleSpellcheck, chord: Pref(O, 's'), name: "spellcheck on/off" },
     Binding { cmd: Cmd::AddToDictionary, chord: Pref(O, 'a'), name: "add word to dictionary" },
     Binding { cmd: Cmd::ToggleTypewriter, chord: Pref(O, 't'), name: "typewriter scrolling on/off" },
+    Binding { cmd: Cmd::OtherWindow, chord: Pref(O, 'k'), name: "other window (open/switch)" },
 ];
 
 /// Human-readable chord for display in menus, the palette, and help.

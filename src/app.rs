@@ -665,8 +665,9 @@ impl App {
 
     /// Remember the current position on the jump ring.
     fn push_jump(&mut self) {
-        if self.jump_stack.last() != Some(&self.cursor) {
-            self.jump_stack.push(self.cursor);
+        let cursor = self.cursor;
+        if self.jump_stack.last() != Some(&cursor) {
+            self.jump_stack.push(cursor);
             if self.jump_stack.len() > JUMP_STACK_MAX {
                 self.jump_stack.remove(0);
             }
@@ -682,10 +683,11 @@ impl App {
     /// ^QP: go back to where you were; repeated presses walk the ring.
     fn jump_back(&mut self) {
         while let Some(p) = self.jump_stack.pop() {
-            if p != self.cursor && p <= self.buf.len_chars() {
+            let cursor = self.cursor;
+            if p != cursor && p <= self.buf.len_chars() {
                 // Rotate: the position we're leaving goes to the bottom, so
                 // repeated ^QP cycles rather than exhausts.
-                self.jump_stack.insert(0, self.cursor);
+                self.jump_stack.insert(0, cursor);
                 self.set_cursor(p);
                 return;
             }
@@ -1233,6 +1235,7 @@ impl App {
                     InputAction::ReadFile => self.read_file(&path),
                     InputAction::ExportClean => self.export_clean(&path),
                     InputAction::ExportManuscript => self.export_manuscript(&path),
+                    InputAction::OpenSplit => self.open_split(&path),
                     InputAction::WrapMargin => match path.parse::<usize>() {
                         Ok(n) => {
                             self.wrap_margin = n;
@@ -1560,6 +1563,59 @@ impl App {
             Err(e) => self.status_msg = Some(format!("Save failed: {e}")),
         }
     }
+
+    // --- windows ---------------------------------------------------------------
+
+    /// ^KQ/^KX: with two windows, close just the active one; with one, quit.
+    fn close_or_quit(&mut self) {
+        if self.panes.len() > 1 {
+            self.panes[self.active].save_session();
+            self.panes.remove(self.active);
+            self.active = 0;
+            self.status_msg = Some(String::from("Window closed"));
+        } else {
+            self.quit = true;
+        }
+    }
+
+    /// ^OK with one window: open `path` in a second window below and focus it.
+    fn open_split(&mut self, path: &str) {
+        if self.panes.len() >= 2 {
+            return;
+        }
+        match Pane::open(Some(PathBuf::from(path))) {
+            Ok(pane) => {
+                self.panes.push(pane);
+                self.active = self.panes.len() - 1;
+            }
+            Err(e) => self.status_msg = Some(format!("Open failed: {e}")),
+        }
+    }
+
+    /// ^KA (WordStar): copy the block marked in the *other* window to the
+    /// cursor here. Each window keeps its own marked block — this is the
+    /// bridge between them. The copy becomes this window's marked block,
+    /// mirroring ^KC's behavior within one document.
+    fn copy_from_other(&mut self) {
+        if self.panes.len() < 2 {
+            self.status_msg = Some(String::from("No second window (^OK opens one)"));
+            return;
+        }
+        let other = 1 - self.active;
+        let Some((b, e)) = self.panes[other].blocks.range() else {
+            self.status_msg = Some(String::from("No block marked in the other window"));
+            return;
+        };
+        let text: String = self.panes[other].buf.rope.slice(b..e).to_string();
+        let len = e - b;
+        let at = self.cursor;
+        self.blocks.remember();
+        self.apply_edit(at, 0, &text, EditKind::Other, at);
+        self.blocks.begin = Some(at);
+        self.blocks.end = Some(at + len);
+        self.blocks.hidden = false;
+        self.status_msg = Some(String::from("Block copied from other window"));
+    }
 }
 
 fn is_word(c: char) -> bool {
@@ -1587,6 +1643,7 @@ fn is_edit_cmd(cmd: Cmd) -> bool {
             | Cmd::BlockMove
             | Cmd::BlockDelete
             | Cmd::Put
+            | Cmd::CopyFromOther
     )
 }
 
