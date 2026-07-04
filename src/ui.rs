@@ -11,6 +11,7 @@ use crate::buffer::{grapheme_width, wrap_segments};
 use crate::keymap;
 use crate::markdown::{self, MdKind};
 use crate::outline;
+use crate::pane::Pane;
 use crate::search::ReplacePhase;
 use crate::spellcheck;
 use crate::splash;
@@ -59,11 +60,37 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         None
     };
 
-    app.view_rows = text_area.height as usize;
-    app.view_cols = text_area.width as usize;
+    // Window layout: one pane fills the text area; two stack vertically,
+    // each over its own modeline. On a terminal too short to split, only
+    // the active pane is shown full-size.
+    let split = app.panes.len() == 2 && text_area.height >= 6;
+    let (pane_ids, pane_areas, modelines) = if split {
+        let h = text_area.height;
+        let p0_h = (h - 2) / 2;
+        let p1_h = h - 2 - p0_h;
+        let a0 = Rect { height: p0_h, ..text_area };
+        let m0 = Rect { y: text_area.y + p0_h, height: 1, ..text_area };
+        let a1 = Rect { y: m0.y + 1, height: p1_h, ..text_area };
+        let m1 = Rect { y: a1.y + p1_h, height: 1, ..text_area };
+        (vec![0usize, 1], vec![a0, a1], vec![m0, m1])
+    } else {
+        (vec![app.active], vec![text_area], Vec::new())
+    };
+
+    for (slot, &pid) in pane_ids.iter().enumerate() {
+        app.panes[pid].view_rows = pane_areas[slot].height as usize;
+        app.panes[pid].view_cols = pane_areas[slot].width as usize;
+    }
     app.ensure_visible();
 
-    draw_text(frame, app, text_area);
+    for (slot, &pid) in pane_ids.iter().enumerate() {
+        draw_text(frame, app, pid, pane_areas[slot]);
+    }
+    for (slot, &pid) in pane_ids.iter().enumerate() {
+        if let Some(m) = modelines.get(slot) {
+            draw_modeline(frame, app, pid, *m);
+        }
+    }
     if let Some(ra) = reveal_area {
         draw_reveal(frame, app, ra);
     }
@@ -80,7 +107,28 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if matches!(app.mode, Mode::Outline { .. }) {
         draw_outline(frame, app, text_area);
     }
-    place_cursor(frame, app, text_area);
+    let active_slot = pane_ids.iter().position(|&p| p == app.active).unwrap_or(0);
+    place_cursor(frame, app, pane_areas[active_slot]);
+}
+
+/// The divider under each window when split: filename, dirty dot, and line
+/// number, drawn as a solid bar (bright for the focused window, dim for the
+/// other) so it always reads which window has the keyboard.
+fn draw_modeline(frame: &mut Frame, app: &App, pane_idx: usize, area: Rect) {
+    let pane = &app.panes[pane_idx];
+    let is_active = pane_idx == app.active;
+    let dirty = if pane.buf.dirty { " •" } else { "" };
+    let line_no = pane.buf.line_of(pane.cursor) + 1;
+    let marker = if is_active { "▶" } else { "─" };
+    let label = format!("{marker} {}{dirty} ─ Ln {line_no} ", pane.buf.file_name());
+    let fill = "─".repeat(
+        (area.width as usize).saturating_sub(UnicodeWidthStr::width(label.as_str())),
+    );
+    let style = if is_active { app.theme.status } else { app.theme.dim };
+    frame.render_widget(
+        Paragraph::new(Line::from(format!("{label}{fill}"))).style(style),
+        area,
+    );
 }
 
 /// The startup splash: a big block-letter banner in a double-bordered box,
@@ -162,18 +210,27 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn draw_text(frame: &mut Frame, app: &App, area: Rect) {
-    let query = app.active_query().map(str::to_owned);
-    let block_range = app.blocks.visible_range();
+fn draw_text(frame: &mut Frame, app: &App, pane_idx: usize, area: Rect) {
+    let pane = &app.panes[pane_idx];
+    let is_active = pane_idx == app.active;
+    // Search-match highlighting follows the keyboard: only the focused
+    // window shows live matches. Each window paints its own marked block.
+    let query = if is_active {
+        app.active_query().map(str::to_owned)
+    } else {
+        None
+    };
+    let block_range = pane.blocks.visible_range();
     let height = area.height as usize;
-    let last = app.buf.len_lines();
+    let last = pane.buf.len_lines();
     let mut lines: Vec<Line> = Vec::with_capacity(height);
 
-    match app.wrap_width() {
+    match app.wrap_width_of(pane) {
         Some(width) => {
-            let mut doc_line = app.top_line;
+            let mut doc_line = pane.top_line;
             while lines.len() < height && doc_line < last {
-                let (text, styles) = line_styles(app, doc_line, query.as_deref(), block_range);
+                let (text, styles) =
+                    line_styles(app, pane, doc_line, query.as_deref(), block_range);
                 for (s, e) in wrap_segments(&text, width) {
                     if lines.len() >= height {
                         break;
@@ -186,12 +243,13 @@ fn draw_text(frame: &mut Frame, app: &App, area: Rect) {
         }
         None => {
             for row in 0..height {
-                let doc_line = app.top_line + row;
+                let doc_line = pane.top_line + row;
                 if doc_line >= last {
                     break;
                 }
-                let (text, styles) = line_styles(app, doc_line, query.as_deref(), block_range);
-                lines.push(styled_clip(&text, &styles, app.left_col, area.width as usize));
+                let (text, styles) =
+                    line_styles(app, pane, doc_line, query.as_deref(), block_range);
+                lines.push(styled_clip(&text, &styles, pane.left_col, area.width as usize));
             }
         }
     }
@@ -205,11 +263,12 @@ fn draw_text(frame: &mut Frame, app: &App, area: Rect) {
 /// matches, then the marked block on top). Note lines are wholly dimmed.
 fn line_styles(
     app: &App,
+    pane: &Pane,
     doc_line: usize,
     query: Option<&str>,
     block_range: Option<(usize, usize)>,
 ) -> (String, Vec<Style>) {
-    let text = app.buf.line_text(doc_line).into_owned();
+    let text = pane.buf.line_text(doc_line).into_owned();
     let n_chars = text.chars().count();
 
     if text.trim_start().starts_with("..") {
@@ -217,7 +276,7 @@ fn line_styles(
         return (text, styles);
     }
 
-    let line_start = app.buf.line_start(doc_line);
+    let line_start = pane.buf.line_start(doc_line);
     let mut styles: Vec<Style> = vec![Style::default(); n_chars];
 
     for (s, e, kind) in markdown::scan_line(&text) {
