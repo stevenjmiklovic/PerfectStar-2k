@@ -71,8 +71,20 @@ Search, files, screen:
 | `^OB` | cycle theme | `^OW ^OR` | word wrap / wrap margin |
 | `^OH` | help level (0 clean · 1 menus · 2 hints) | `^OT` | typewriter scrolling on/off |
 | `^OS` | spellcheck on/off | `^OA` | add word under cursor to personal dictionary |
+| `^OK` | other window: open a file in a split, or switch focus | `^KA` | copy the other window's marked block to cursor |
 
 Hold any prefix (`^K` `^Q` `^O`) briefly and its menu appears, WordStar style.
+
+## Two windows
+
+`^OK` splits the screen and opens a second document below the first (press it
+again to bounce between them; `^KQ`/`^KX` close just the focused window when
+two are open). Each window is a complete editing context — its own cursor,
+undo history, bookmarks, jump ring, and, most importantly, **its own marked
+block**, exactly the WordStar feature Sawyer's essay singles out. The kill
+ring is shared, so `^KY` in one window and `^KP` in the other moves text
+between documents — or mark a block in one window and `^KA` copies it
+straight to the cursor in the other.
 
 ## Sessions
 

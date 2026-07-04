@@ -1,6 +1,6 @@
 [package]
 name = "perfectstar2k"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "A modern TUI homage to WordStar & WordPerfect for DOS — a real writing tool built on WordStar's touch-typist command language and long-hand-page metaphor."
 license = "GPL-3.0-only"
