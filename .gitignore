@@ -1,0 +1,18 @@
+# Build artifacts
+/target/
+
+# macOS
+.DS_Store
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Backup files
+*.bak
+
+# Environment
+.env
