@@ -13,6 +13,7 @@
 
 use crate::buffer::Buffer;
 use crate::markdown::{self, MdKind};
+use crate::normalize;
 
 /// The serif body font a manuscript export uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +77,7 @@ pub fn render(buf: &Buffer, font: ManuscriptFont) -> String {
         let text = buf.line_text(line);
 
         // Note-to-self lines never reach a reader (matches `export_clean`).
-        if text.trim_start().starts_with("..") {
+        if normalize::is_note_line(&text) {
             continue;
         }
         // Blank lines are paragraph separators in the source — never emit an
@@ -177,61 +178,39 @@ fn render_line(text: &str) -> String {
 /// Upgrade straight ASCII punctuation to typographic characters, carrying each
 /// replacement's emphasis from the first source char it consumes. Characters
 /// tagged `code` are passed through untouched.
+///
+/// The substitution rules themselves live in [`normalize::smart_char`] so the
+/// exporter, stats, and word-count all smarten prose identically; this wrapper
+/// only adds the RTF-specific concerns: skipping `code` runs and threading each
+/// run's emphasis onto the replacement char. Open/close quote decisions use the
+/// *source* predecessor char (as this always has), so output is unchanged.
 fn smart_typography(tagged: &[(char, Emphasis)]) -> Vec<(char, Emphasis)> {
+    let chars: Vec<char> = tagged.iter().map(|&(c, _)| c).collect();
     let mut out: Vec<(char, Emphasis)> = Vec::with_capacity(tagged.len());
     let mut i = 0;
     while i < tagged.len() {
         let (c, emph) = tagged[i];
 
+        // Inline `code` is literal: no typographic substitution inside it.
         if emph.code {
             out.push((c, emph));
             i += 1;
             continue;
         }
 
-        match c {
-            '-' if run_len(tagged, i, '-') >= 2 => {
-                // `--` (or more) → em dash.
-                out.push(('\u{2014}', emph));
-                i += run_len(tagged, i, '-');
+        let prev = if i == 0 { None } else { Some(chars[i - 1]) };
+        match normalize::smart_char(&chars, i, prev) {
+            Some(sub) => {
+                out.push((sub.ch, emph));
+                i += sub.consumed;
             }
-            '.' if run_len(tagged, i, '.') >= 3 => {
-                // `...` → ellipsis (exactly three; extra dots stay literal).
-                out.push(('\u{2026}', emph));
-                i += 3;
-            }
-            '"' => {
-                let open = i == 0 || opens_quote(tagged[i - 1].0);
-                out.push((if open { '\u{201C}' } else { '\u{201D}' }, emph));
-                i += 1;
-            }
-            '\'' => {
-                let open = i == 0 || opens_quote(tagged[i - 1].0);
-                out.push((if open { '\u{2018}' } else { '\u{2019}' }, emph));
-                i += 1;
-            }
-            _ => {
+            None => {
                 out.push((c, emph));
                 i += 1;
             }
         }
     }
     out
-}
-
-/// Whether a preceding character means the next quote opens (rather than
-/// closes / is an apostrophe).
-fn opens_quote(prev: char) -> bool {
-    prev.is_whitespace() || matches!(prev, '(' | '[' | '{' | '\u{2014}' | '\u{2013}')
-}
-
-/// Length of the run of `target` starting at `i`.
-fn run_len(tagged: &[(char, Emphasis)], i: usize, target: char) -> usize {
-    let mut n = 0;
-    while i + n < tagged.len() && tagged[i + n].0 == target {
-        n += 1;
-    }
-    n
 }
 
 /// RTF-escape one already-typography-processed character.

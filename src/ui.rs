@@ -271,7 +271,7 @@ fn line_styles(
     let text = pane.buf.line_text(doc_line).into_owned();
     let n_chars = text.chars().count();
 
-    if text.trim_start().starts_with("..") {
+    if crate::normalize::is_note_line(&text) {
         let styles = vec![app.theme.dim; n_chars];
         return (text, styles);
     }
@@ -498,6 +498,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             keymap::Prefix::K => "^K ",
             keymap::Prefix::Q => "^Q ",
             keymap::Prefix::O => "^O ",
+            keymap::Prefix::P => "^P ",
         },
         None => "",
     };

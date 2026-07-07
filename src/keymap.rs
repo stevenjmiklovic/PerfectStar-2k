@@ -2,12 +2,13 @@
 //! The key dispatcher, the delayed prefix menus, the command palette, and the
 //! help screen are all generated from this table.
 
-/// A prefix key (^K, ^Q, ^O) awaiting its second key.
+/// A prefix key (^K, ^Q, ^O, ^P) awaiting its second key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Prefix {
     K,
     Q,
     O,
+    P,
 }
 
 impl Prefix {
@@ -16,6 +17,7 @@ impl Prefix {
             Prefix::K => "^K Block & File",
             Prefix::Q => "^Q Quick",
             Prefix::O => "^O Onscreen",
+            Prefix::P => "^P Project",
         }
     }
 }
@@ -116,7 +118,7 @@ pub struct Binding {
 }
 
 use Chord::{Bare, Pref};
-use Prefix::{K, O, Q};
+use Prefix::{K, O, P, Q};
 
 pub const BINDINGS: &[Binding] = &[
     // The diamond
@@ -202,6 +204,7 @@ pub fn chord_label(chord: Chord) -> String {
                 K => 'K',
                 Q => 'Q',
                 O => 'O',
+                P => 'P',
             };
             format!("^{p}{}", c.to_ascii_uppercase())
         }
@@ -259,4 +262,46 @@ pub fn menu_entries(prefix: Prefix) -> Vec<(char, &'static str)> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_prefix_has_a_label() {
+        assert_eq!(Prefix::P.label(), "^P Project");
+    }
+
+    #[test]
+    fn project_prefix_has_no_commands_yet() {
+        // Task 0.4 adds only the prefix; commands come in later phases. The
+        // menu machinery must handle an empty prefix without panicking so the
+        // delayed menu simply shows nothing.
+        assert!(menu_entries(Prefix::P).is_empty());
+        assert!(lookup_prefixed(Prefix::P, 'p').is_none());
+    }
+
+    #[test]
+    fn existing_prefixes_still_populated() {
+        // Guard against the new prefix accidentally shadowing the others.
+        assert!(!menu_entries(Prefix::K).is_empty());
+        assert!(!menu_entries(Prefix::Q).is_empty());
+        assert!(!menu_entries(Prefix::O).is_empty());
+    }
+
+    #[test]
+    fn chord_label_renders_p_prefix() {
+        assert_eq!(chord_label(Pref(P, 'b')), "^PB");
+    }
+
+    #[test]
+    fn palette_entries_are_deduplicated() {
+        // Save is bound to both ^KD and ^KS; it must appear once.
+        let saves = palette_entries()
+            .into_iter()
+            .filter(|(cmd, _, _)| *cmd == Cmd::Save)
+            .count();
+        assert_eq!(saves, 1);
+    }
 }

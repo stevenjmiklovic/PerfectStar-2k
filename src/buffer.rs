@@ -50,14 +50,12 @@ impl Buffer {
             let _ = std::fs::copy(&path, PathBuf::from(bak));
             self.backed_up = true;
         }
-        let mut tmp = path.clone().into_os_string();
-        tmp.push(".tmp~");
-        let tmp = PathBuf::from(tmp);
-        {
-            let file = std::fs::File::create(&tmp)?;
-            self.rope.write_to(io::BufWriter::new(file))?;
-        }
-        std::fs::rename(&tmp, &path)?;
+        // Stream the rope straight into the temp file so a huge manuscript is
+        // never fully copied into a byte buffer just to save. The temp-then-
+        // rename crash-safety lives in the shared helper (R11.5).
+        crate::paths::write_atomic_with(&path, |file| {
+            self.rope.write_to(io::BufWriter::new(file))
+        })?;
         self.dirty = false;
         Ok(())
     }

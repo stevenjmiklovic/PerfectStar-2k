@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::history::{Edit, EditGroup, EditKind};
 use crate::keymap::{self, Cmd, Prefix};
 use crate::killring::{KillRing, PutCycle};
+use crate::normalize;
 use crate::outline;
 use crate::pane::Pane;
 use crate::rtf;
@@ -260,6 +261,7 @@ impl App {
                     'k' => self.prefix = Some((Prefix::K, Instant::now())),
                     'q' => self.prefix = Some((Prefix::Q, Instant::now())),
                     'o' => self.prefix = Some((Prefix::O, Instant::now())),
+                    'p' => self.prefix = Some((Prefix::P, Instant::now())),
                     _ => {
                         if let Some(cmd) = keymap::lookup_bare(c) {
                             self.execute(cmd);
@@ -372,7 +374,9 @@ impl App {
                 match prefix {
                     Prefix::K => self.set_bookmark(slot),
                     Prefix::Q => self.jump_bookmark(slot),
-                    Prefix::O => self.status_msg = Some(String::from("Unknown command")),
+                    Prefix::O | Prefix::P => {
+                        self.status_msg = Some(String::from("Unknown command"))
+                    }
                 }
             }
             Some(c) => match keymap::lookup_prefixed(prefix, c) {
@@ -893,7 +897,7 @@ impl App {
         for offset in 0..=total_lines {
             let line = (start_line + offset) % total_lines;
             let text = self.buf.line_text(line);
-            if text.trim_start().starts_with("..") {
+            if normalize::is_note_line(&text) {
                 continue;
             }
             let line_start = self.buf.line_start(line);
@@ -1281,7 +1285,7 @@ impl App {
                 continue;
             }
             let text: String = self.buf.rope.slice(start..end).to_string();
-            if text.trim_start().starts_with("..") {
+            if normalize::is_note_line(&text) {
                 continue;
             }
             out.push_str(&text);
@@ -1625,7 +1629,7 @@ fn is_word(c: char) -> bool {
 fn is_prefix_key(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char(c)
         if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(c.to_ascii_lowercase(), 'k' | 'q' | 'o'))
+            && matches!(c.to_ascii_lowercase(), 'k' | 'q' | 'o' | 'p'))
 }
 
 fn is_edit_cmd(cmd: Cmd) -> bool {
@@ -1652,5 +1656,6 @@ fn prefix_caret(prefix: Prefix) -> &'static str {
         Prefix::K => "^K",
         Prefix::Q => "^Q",
         Prefix::O => "^O",
+        Prefix::P => "^P",
     }
 }
