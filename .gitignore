@@ -16,3 +16,8 @@
 
 # Environment
 .env
+
+# PTY test harness venv and generated fixtures
+/.harness-venv/
+/tests/fixtures/
+__pycache__/
