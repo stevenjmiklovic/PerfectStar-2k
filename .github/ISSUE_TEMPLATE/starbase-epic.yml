@@ -1,0 +1,67 @@
+name: StarBase epic
+description: Plan a multi-issue StarBase workstream
+title: "[StarBase][Epic] "
+labels:
+  - starbase
+  - epic
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for a StarBase workstream with multiple deliverables. Keep manuscript safety, provenance, and graceful degradation explicit.
+  - type: input
+    id: phase
+    attributes:
+      label: Phase
+      placeholder: "Phase 0 - Contracts and scaffolding"
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: Describe the user-visible or architectural result.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: List the concrete deliverables included in this epic.
+    validations:
+      required: true
+  - type: textarea
+    id: exclusions
+    attributes:
+      label: Explicit exclusions
+      description: Record tempting work that is intentionally not part of this epic.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      placeholder: "Depends on #...; blocks #..."
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance gates
+      description: List testable release gates. Code merged is not sufficient.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks and mitigations
+  - type: dropdown
+    id: security
+    attributes:
+      label: Security review required?
+      options:
+        - "Yes"
+        - "No"
+    validations:
+      required: true
