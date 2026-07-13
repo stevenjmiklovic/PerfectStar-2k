@@ -15,6 +15,10 @@ Each ADR documents the context, the decision, and its consequences so future con
 | [ADR-005](./ADR-005-bundled-hunspell-spellcheck.md) | Bundled Hunspell dictionary via spellbook (offline spellcheck) | Accepted | 2025-06-15 |
 | [ADR-006](./ADR-006-hand-generated-rtf-manuscript-export.md) | Hand-generated RTF for manuscript export | Accepted | 2025-06-15 |
 | [ADR-007](./ADR-007-dos-accurate-truecolor-themes.md) | DOS-accurate truecolor theme system | Accepted | 2025-06-15 |
+| [ADR-008](./ADR-008-cargo-workspace-restructure.md) | Cargo workspace restructure | Accepted | 2025-07-14 |
+| [ADR-009](./ADR-009-polling-crate-event-loop.md) | Polling crate for lightweight event loop | Accepted | 2025-07-14 |
+| [ADR-010](./ADR-010-cross-platform-mpv-ipc.md) | Cross-platform mpv IPC via trait abstraction | Accepted | 2025-07-14 |
+| [ADR-011](./ADR-011-shell-out-integration-for-radio.md) | Shell-out integration pattern for pstar-radio | Accepted | 2025-07-14 |
 
 ## Format
 
