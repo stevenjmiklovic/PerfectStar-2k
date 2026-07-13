@@ -21,3 +21,4 @@
 /.harness-venv/
 /tests/fixtures/
 __pycache__/
+.claude/agents/*
