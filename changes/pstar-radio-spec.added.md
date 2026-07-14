@@ -1,1 +1,0 @@
-Add pstar-radio spec and architectural decision records (ADR-008 through ADR-011) for the YouTube radio feature: Cargo workspace restructure, polling-based event loop, cross-platform mpv IPC, and shell-out integration via `^OY`.
