@@ -19,6 +19,7 @@ use crate::normalize;
 use crate::outline;
 use crate::pane::Pane;
 use crate::project::Project;
+use crate::projsearch;
 use crate::recovery::{self, Journal};
 use crate::rtf;
 use crate::search::{ReplacePhase, ReplaceState, SearchState};
@@ -55,6 +56,10 @@ pub enum InputAction {
     ProjectAddDoc,
     /// Set a session word goal (e.g. "500" for 500 words).
     SetGoal,
+    /// Project-wide search query (^PS).
+    ProjectSearch,
+    /// Project-wide replace: "find|replace" format (^PW).
+    ProjectReplace,
 }
 
 /// What the keyboard is currently driving.
@@ -89,6 +94,14 @@ pub enum Mode {
     },
     /// Daily writing history overlay (R2.5, task 4.4).
     Stats,
+    /// Project-wide search results (R6, task 5.1).
+    ProjectSearch {
+        query: String,
+        results: Vec<projsearch::Match>,
+        selected: usize,
+        /// Whether to enter replace mode after search.
+        replace_with: Option<String>,
+    },
 }
 
 /// An entry in the binder panel, with display information for a project document.
@@ -467,6 +480,7 @@ impl App {
             Mode::Outline { .. } => self.handle_outline_key(key),
             Mode::Binder { .. } => self.handle_binder_key(key),
             Mode::Stats => self.mode = Mode::Normal,
+            Mode::ProjectSearch { .. } => self.handle_project_search_key(key),
             Mode::Normal => self.handle_normal_key(key),
         }
     }
@@ -1047,6 +1061,28 @@ impl App {
                     self.mode = Mode::Normal;
                 } else {
                     self.mode = Mode::Stats;
+                }
+            }
+            Cmd::ProjectFind => {
+                if self.project.is_some() {
+                    self.mode = Mode::Input {
+                        label: String::from("Project search"),
+                        value: String::new(),
+                        action: InputAction::ProjectSearch,
+                    };
+                } else {
+                    self.status_msg = Some(String::from("No project loaded (^PP to open)"));
+                }
+            }
+            Cmd::ProjectReplace => {
+                if self.project.is_some() {
+                    self.mode = Mode::Input {
+                        label: String::from("Project replace (find|replace)"),
+                        value: String::new(),
+                        action: InputAction::ProjectReplace,
+                    };
+                } else {
+                    self.status_msg = Some(String::from("No project loaded (^PP to open)"));
                 }
             }
         }
@@ -1709,6 +1745,18 @@ impl App {
                                 Some(String::from("Enter a positive number of words"));
                         }
                     },
+                    InputAction::ProjectSearch => self.run_project_search(&path, None),
+                    InputAction::ProjectReplace => {
+                        // Format: "find|replace"
+                        if let Some((find, replace)) = path.split_once('|') {
+                            let find = find.to_string();
+                            let replace = replace.to_string();
+                            self.run_project_search(&find, Some(replace));
+                        } else {
+                            self.status_msg =
+                                Some(String::from("Format: search|replacement (separate with |)"));
+                        }
+                    }
                 }
             }
             _ => {}
@@ -2505,6 +2553,258 @@ impl App {
         } else {
             self.status_msg = Some(String::from("No project loaded"));
         }
+    }
+
+    // --- project-wide search (R6) -------------------------------------------
+
+    fn run_project_search(&mut self, query: &str, replace_with: Option<String>) {
+        let Some(ref project) = self.project else {
+            self.status_msg = Some(String::from("No project loaded"));
+            return;
+        };
+        let docs: Vec<(usize, String, std::path::PathBuf)> = project
+            .manifest
+            .docs
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (i, d.title.clone(), d.path.clone()))
+            .collect();
+
+        let active_path = self.panes[self.active].buf.path.clone();
+        let results = projsearch::search_project(
+            &docs,
+            query,
+            false,
+            active_path.as_deref(),
+            Some(&self.panes[self.active].buf.rope),
+        );
+
+        if results.is_empty() {
+            self.status_msg = Some(format!("No matches for \"{query}\" in project"));
+            return;
+        }
+        let count = results.len();
+        self.mode = Mode::ProjectSearch {
+            query: query.to_string(),
+            results,
+            selected: 0,
+            replace_with,
+        };
+        self.status_msg = Some(format!("{count} match(es) found"));
+    }
+
+    fn handle_project_search_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let (num_results, selected, replace_with) = {
+            let Mode::ProjectSearch {
+                results,
+                selected,
+                replace_with,
+                ..
+            } = &self.mode
+            else {
+                return;
+            };
+            (results.len(), *selected, replace_with.clone())
+        };
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Up | KeyCode::Char('e') if ctrl || matches!(key.code, KeyCode::Up) => {
+                if let Mode::ProjectSearch { selected, .. } = &mut self.mode {
+                    *selected = selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('x') if ctrl || matches!(key.code, KeyCode::Down) => {
+                if let Mode::ProjectSearch { selected, .. } = &mut self.mode {
+                    *selected = (*selected + 1).min(num_results.saturating_sub(1));
+                }
+            }
+            KeyCode::Enter => {
+                // Jump to the selected result (R6.2).
+                self.project_search_jump(selected);
+            }
+            KeyCode::Char('r') if ctrl && replace_with.is_some() => {
+                // Replace at current match and advance (R6.3).
+                self.project_search_replace_at(selected);
+            }
+            KeyCode::Char('a') if ctrl && replace_with.is_some() => {
+                // Replace all remaining (R6.3).
+                self.project_search_replace_all();
+            }
+            _ => {}
+        }
+    }
+
+    fn project_search_jump(&mut self, idx: usize) {
+        let (path, char_pos) = {
+            let Mode::ProjectSearch { results, .. } = &self.mode else {
+                return;
+            };
+            let Some(m) = results.get(idx) else { return };
+            (m.path.clone(), m.char_pos)
+        };
+        self.mode = Mode::Normal;
+
+        // If the file is already in the active pane, just jump.
+        if self.panes[self.active].buf.path.as_deref() == Some(path.as_path()) {
+            self.long_jump(char_pos);
+            return;
+        }
+
+        // Open the doc (R6.2).
+        match Pane::open(Some(path)) {
+            Ok(pane) => {
+                let journal = Journal::new(pane.buf.path.as_deref());
+                self.panes[self.active] = pane;
+                self.recovery_journals[self.active] = journal;
+                // Recompute stats for the new document.
+                self.doc_stats =
+                    crate::stats::DocStats::from_rope(&self.panes[self.active].buf.rope);
+                self.long_jump(char_pos);
+            }
+            Err(e) => {
+                self.status_msg = Some(format!("Failed to open: {e}"));
+            }
+        }
+    }
+
+    fn project_search_replace_at(&mut self, idx: usize) {
+        let (path, char_pos, query_len, replacement) = {
+            let Mode::ProjectSearch {
+                results,
+                query,
+                replace_with,
+                ..
+            } = &self.mode
+            else {
+                return;
+            };
+            let Some(m) = results.get(idx) else { return };
+            let Some(rep) = replace_with.as_ref() else {
+                return;
+            };
+            (
+                m.path.clone(),
+                m.char_pos,
+                query.chars().count(),
+                rep.clone(),
+            )
+        };
+
+        // Ensure the file is open in the active pane.
+        if self.panes[self.active].buf.path.as_deref() != Some(path.as_path()) {
+            match Pane::open(Some(path)) {
+                Ok(pane) => {
+                    let journal = Journal::new(pane.buf.path.as_deref());
+                    self.panes[self.active] = pane;
+                    self.recovery_journals[self.active] = journal;
+                    self.doc_stats =
+                        crate::stats::DocStats::from_rope(&self.panes[self.active].buf.rope);
+                }
+                Err(e) => {
+                    self.status_msg = Some(format!("Failed to open for replace: {e}"));
+                    return;
+                }
+            }
+        }
+
+        // Apply the replacement as an undoable edit (R6.4, R6.6).
+        self.set_cursor(char_pos);
+        self.apply_edit(
+            char_pos,
+            query_len,
+            &replacement,
+            EditKind::Other,
+            char_pos + replacement.chars().count(),
+        );
+        self.save();
+
+        // Advance to next result (remove current from the list).
+        if let Mode::ProjectSearch {
+            results, selected, ..
+        } = &mut self.mode
+        {
+            results.remove(idx);
+            if results.is_empty() {
+                self.mode = Mode::Normal;
+                self.status_msg = Some(String::from("All replacements done"));
+            } else {
+                *selected = idx.min(results.len().saturating_sub(1));
+            }
+        }
+    }
+
+    fn project_search_replace_all(&mut self) {
+        // Replace from the end to preserve char positions within each file.
+        let entries = {
+            let Mode::ProjectSearch {
+                results,
+                query,
+                replace_with,
+                ..
+            } = &self.mode
+            else {
+                return;
+            };
+            let Some(rep) = replace_with.as_ref() else {
+                return;
+            };
+            // Group by path, process in reverse char-pos order so offsets stay valid.
+            let mut entries: Vec<(std::path::PathBuf, usize, usize, String)> = results
+                .iter()
+                .map(|m| {
+                    (
+                        m.path.clone(),
+                        m.char_pos,
+                        query.chars().count(),
+                        rep.clone(),
+                    )
+                })
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+            entries
+        };
+
+        let mut count = 0usize;
+        let mut last_path: Option<std::path::PathBuf> = None;
+
+        for (path, char_pos, query_len, replacement) in &entries {
+            // Open file if not already loaded.
+            if self.panes[self.active].buf.path.as_deref() != Some(path.as_path()) {
+                // Save previous file if it was modified.
+                if self.panes[self.active].buf.dirty {
+                    self.save();
+                }
+                match Pane::open(Some(path.clone())) {
+                    Ok(pane) => {
+                        let journal = Journal::new(pane.buf.path.as_deref());
+                        self.panes[self.active] = pane;
+                        self.recovery_journals[self.active] = journal;
+                        self.doc_stats =
+                            crate::stats::DocStats::from_rope(&self.panes[self.active].buf.rope);
+                    }
+                    Err(_) => continue,
+                }
+            }
+            last_path = Some(path.clone());
+            self.set_cursor(*char_pos);
+            self.apply_edit(
+                *char_pos,
+                *query_len,
+                replacement,
+                EditKind::Other,
+                char_pos + replacement.chars().count(),
+            );
+            count += 1;
+        }
+
+        // Save the last modified file.
+        if self.panes[self.active].buf.dirty {
+            self.save();
+        }
+        let _ = last_path; // suppress unused warning
+        self.mode = Mode::Normal;
+        self.status_msg = Some(format!("{count} replacement(s) made"));
     }
 }
 

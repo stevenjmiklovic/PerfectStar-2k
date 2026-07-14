@@ -120,6 +120,10 @@ pub enum Cmd {
     SetGoal,
     /// Show daily writing history overlay (R2.5).
     StatsOverlay,
+    /// Search across all project documents (R6.1).
+    ProjectFind,
+    /// Replace across all project documents (R6.3).
+    ProjectReplace,
 }
 
 /// How a command is typed.
@@ -561,6 +565,16 @@ pub const BINDINGS: &[Binding] = &[
         cmd: Cmd::ExportProjectHtml,
         chord: Pref(P, 'h'),
         name: "export project HTML",
+    },
+    Binding {
+        cmd: Cmd::ProjectFind,
+        chord: Pref(P, 's'),
+        name: "project search",
+    },
+    Binding {
+        cmd: Cmd::ProjectReplace,
+        chord: Pref(P, 'w'),
+        name: "project replace",
     },
 ];
 

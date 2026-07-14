@@ -12,6 +12,7 @@ mod outline;
 mod pane;
 mod paths;
 mod project;
+mod projsearch;
 mod recovery;
 mod rtf;
 mod search;

@@ -128,6 +128,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if matches!(app.mode, Mode::Stats) {
         draw_stats_overlay(frame, app, text_area);
     }
+    if matches!(app.mode, Mode::ProjectSearch { .. }) {
+        draw_project_search(frame, app, text_area);
+    }
     let active_slot = pane_ids.iter().position(|&p| p == app.active).unwrap_or(0);
     place_cursor(frame, app, pane_areas[active_slot]);
 }
@@ -527,6 +530,13 @@ fn status_left(app: &App) -> String {
         Mode::Outline { .. } => String::from(" ↑↓ select · Enter go to heading · Esc close"),
         Mode::Binder { .. } => String::from(" ↑↓ select · Enter open document · Esc close"),
         Mode::Stats => String::from(" Writing Stats · press any key to close"),
+        Mode::ProjectSearch { query, results, .. } => {
+            format!(
+                " Project search: \"{}\" — {} match(es) · ↑↓ navigate · Enter open · Esc close",
+                query,
+                results.len()
+            )
+        }
         Mode::Normal => match &app.status_msg {
             Some(msg) => format!(" {msg}"),
             None => {
@@ -918,6 +928,63 @@ fn draw_stats_overlay(frame: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .title(" Writing Stats ");
+    let para = Paragraph::new(lines).block(block).style(app.theme.status);
+    frame.render_widget(para, overlay);
+}
+
+/// Project search results list (^PS, R6.1).
+fn draw_project_search(frame: &mut Frame, app: &App, area: Rect) {
+    let Mode::ProjectSearch {
+        results,
+        selected,
+        replace_with,
+        ..
+    } = &app.mode
+    else {
+        return;
+    };
+
+    let width = area.width.saturating_sub(4).min(72);
+    let height = area.height.saturating_sub(2).min(20);
+    let x = (area.width.saturating_sub(width)) / 2 + area.x;
+    let y = (area.height.saturating_sub(height)) / 2 + area.y;
+    let overlay = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, overlay);
+
+    let visible = (height as usize).saturating_sub(2);
+    let first = if *selected >= visible {
+        selected - visible + 1
+    } else {
+        0
+    };
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, m) in results.iter().enumerate().skip(first).take(visible) {
+        let marker = if i == *selected { "▶ " } else { "  " };
+        let ctx: String = m
+            .context
+            .chars()
+            .take((width as usize).saturating_sub(20))
+            .collect();
+        let entry = format!("{marker}{}: L{} — {}", m.title, m.line, ctx);
+        let style = if i == *selected {
+            app.theme.highlight
+        } else {
+            Style::default()
+        };
+        lines.push(Line::styled(entry, style));
+    }
+
+    let title = if replace_with.is_some() {
+        " Project Replace (^R replace · ^A all · Esc cancel) "
+    } else {
+        " Project Search (Enter open · Esc close) "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(title);
     let para = Paragraph::new(lines).block(block).style(app.theme.status);
     frame.render_widget(para, overlay);
 }
