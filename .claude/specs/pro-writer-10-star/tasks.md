@@ -188,31 +188,33 @@ Effort key: **S** ≤ half day · **M** ~1–2 days · **L** ~3–5 days.
 
 *Depends on Phase 1 (manifest).*
 
-- [ ] **5.1 [gate] Project search.** Search each manifest doc (open rope or
+- [x] **5.1 [gate] Project search.** Search each manifest doc (open rope or
   streamed from disk); `Mode::ProjectSearch { results, selected }`; stream
   results in. In-document `^QF`/`^L` unchanged. · Req: R6.1, R6.5, R6.7 ·
   Design §4.6 · Files: `projsearch.rs` (new), `app.rs`, `ui.rs` · **L**
 
-- [ ] **5.2 Jump to result.** Open the doc, place cursor at the match. · Req:
+- [x] **5.2 Jump to result.** Open the doc, place cursor at the match. · Req:
   R6.2 · Files: `app.rs`, `projsearch.rs` · **S**
 
-- [ ] **5.3 Project replace (undoable, reviewable).** Per-match confirm +
+- [x] **5.3 Project replace (undoable, reviewable).** Per-match confirm +
   whole-word/case; edits to unopened files go through a transient pane context
   so each is a proper `EditGroup` + atomic save — never a silent raw rewrite;
   per-file summary. · Req: R6.3, R6.4, R6.6 · Design §4.6 · Files:
   `projsearch.rs`, `app.rs` · **L**
 
-- [ ] **5.4 Tests.** Cross-file match set; replace produces undoable per-file
+- [x] **5.4 Tests.** Cross-file match set; replace produces undoable per-file
   edits; unopened-file edit reviewable; latency on the 300k fixture. · **M**
 
 ---
 
 ## Phase 6 — P0 exit criterion
 
-- [ ] **6.1 P0 acceptance pass.** Verify every P0 criterion (R1, R2, R4*, R6,
+- [x] **6.1 P0 acceptance pass.** Verify every P0 criterion (R1, R2, R4*, R6,
   R7, R11) against `requirements.md` via the PTY harness on a real multi-file
   project. *(\*R4 snapshots land in Phase 7; if P0 milestone must be
   self-contained, pull 7.1–7.3 forward.)* · **M**
+  **Result:** R1 8/8 ✓, R2 7/7 ✓, R6 7/7 ✓, R7 8/8 ✓, R11 6/6 ✓.
+  151 tests pass. R4 deferred to Phase 7 per spec note.
 
 > **Note on R4 (P0):** Snapshots/revisions are P0 in requirements but grouped
 > with the revision UI in Phase 7 for cohesion. If shipping a strict P0
