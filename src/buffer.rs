@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ropey::Rope;
 use unicode_segmentation::UnicodeSegmentation;
@@ -37,27 +37,59 @@ impl Buffer {
         })
     }
 
-    /// Atomic save: back up the original once per run, write to a temp file
-    /// in the same directory, then rename over the original.
+    /// Atomically save to the current path.
+    ///
+    /// The rope is streamed to a sibling temporary file and renamed only
+    /// after the complete write is durable. Therefore any error leaves both
+    /// the in-memory text/dirty state and the previous good destination file
+    /// intact: a manuscript is never truncated by a failed save (R11.4-5).
     pub fn save(&mut self) -> io::Result<()> {
         let path = self
             .path
             .clone()
             .ok_or_else(|| io::Error::other("no file name"))?;
         if !self.backed_up && path.exists() {
-            let mut bak = path.clone().into_os_string();
-            bak.push(".bak");
-            let _ = std::fs::copy(&path, PathBuf::from(bak));
+            Self::backup(&path);
             self.backed_up = true;
         }
+        self.write_atomic(&path)?;
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Atomically save to an alternate path after a normal save failure.
+    ///
+    /// The buffer adopts `path` only after the write succeeds. On failure its
+    /// text, original path, and dirty state remain unchanged so the caller can
+    /// safely offer another location without losing work.
+    pub fn save_as(&mut self, path: PathBuf) -> io::Result<()> {
+        if self.path.as_deref() == Some(path.as_path()) {
+            return self.save();
+        }
+
+        let target_existed = path.exists();
+        if target_existed {
+            Self::backup(&path);
+        }
+        self.write_atomic(&path)?;
+
+        self.path = Some(path);
+        self.backed_up = target_existed;
+        self.dirty = false;
+        Ok(())
+    }
+
+    fn backup(path: &Path) {
+        let mut bak = path.as_os_str().to_owned();
+        bak.push(".bak");
+        let _ = std::fs::copy(path, PathBuf::from(bak));
+    }
+
+    fn write_atomic(&self, path: &Path) -> io::Result<()> {
         // Stream the rope straight into the temp file so a huge manuscript is
         // never fully copied into a byte buffer just to save. The temp-then-
         // rename crash-safety lives in the shared helper (R11.5).
-        crate::paths::write_atomic_with(&path, |file| {
-            self.rope.write_to(io::BufWriter::new(file))
-        })?;
-        self.dirty = false;
-        Ok(())
+        crate::paths::write_atomic_with(path, |file| self.rope.write_to(io::BufWriter::new(file)))
     }
 
     /// Words in the document (runs of word characters).
@@ -269,7 +301,12 @@ impl Buffer {
         }
         let len = self.len_chars();
         let mut j = i + 1;
-        while j < len && matches!(self.rope.char(j), '"' | '\'' | '\u{2019}' | '\u{201d}' | ')' | ']') {
+        while j < len
+            && matches!(
+                self.rope.char(j),
+                '"' | '\'' | '\u{2019}' | '\u{201d}' | ')' | ']'
+            )
+        {
             j += 1;
         }
         j >= len || self.rope.char(j).is_whitespace()
@@ -280,7 +317,12 @@ impl Buffer {
     fn after_sentence_end(&self, i: usize) -> usize {
         let len = self.len_chars();
         let mut j = i + 1;
-        while j < len && matches!(self.rope.char(j), '"' | '\'' | '\u{2019}' | '\u{201d}' | ')' | ']') {
+        while j < len
+            && matches!(
+                self.rope.char(j),
+                '"' | '\'' | '\u{2019}' | '\u{201d}' | ')' | ']'
+            )
+        {
             j += 1;
         }
         j
@@ -347,7 +389,10 @@ impl Buffer {
     fn is_sentence_end_backwards(&self, end: usize) -> bool {
         let mut j = end;
         while j > 0
-            && matches!(self.rope.char(j - 1), '"' | '\'' | '\u{2019}' | '\u{201d}' | ')' | ']')
+            && matches!(
+                self.rope.char(j - 1),
+                '"' | '\'' | '\u{2019}' | '\u{201d}' | ')' | ']'
+            )
         {
             j -= 1;
         }
@@ -363,7 +408,10 @@ impl Buffer {
         }
         let fold = !query.chars().any(|c| c.is_uppercase());
         let q: Vec<char> = if fold {
-            query.chars().map(|c| c.to_lowercase().next().unwrap_or(c)).collect()
+            query
+                .chars()
+                .map(|c| c.to_lowercase().next().unwrap_or(c))
+                .collect()
         } else {
             query.chars().collect()
         };
@@ -615,5 +663,66 @@ mod tests {
     #[test]
     fn wrap_exact_fit_no_extra_segment() {
         assert_eq!(wrap_segments("abcd", 4), vec![(0, 4)]);
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("pstar-buffer-{tag}-{}-{id}", std::process::id()))
+    }
+
+    #[test]
+    fn failed_save_preserves_buffer_and_previous_file() {
+        let dir = scratch_dir("save-failure");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("chapter.md");
+        std::fs::write(&path, "previous good file").unwrap();
+
+        let mut buffer = Buffer::open(Some(path.clone())).unwrap();
+        buffer.insert(buffer.len_chars(), " with unsaved text");
+        let expected_text = buffer.rope.to_string();
+
+        // Force the atomic helper's temp-file creation to fail. The existing
+        // destination remains readable, while the in-memory edit stays dirty.
+        let mut tmp = path.clone().into_os_string();
+        tmp.push(".tmp~");
+        std::fs::create_dir(PathBuf::from(tmp)).unwrap();
+
+        assert!(buffer.save().is_err());
+        assert_eq!(buffer.rope.to_string(), expected_text);
+        assert_eq!(buffer.path.as_deref(), Some(path.as_path()));
+        assert!(buffer.dirty);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "previous good file"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn save_as_adopts_alternate_path_only_after_success() {
+        let dir = scratch_dir("save-as");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut buffer = Buffer::open(None).unwrap();
+        buffer.insert(0, "work in memory");
+
+        let unavailable = dir.join("missing-parent").join("chapter.md");
+        assert!(buffer.save_as(unavailable).is_err());
+        assert!(buffer.path.is_none());
+        assert!(buffer.dirty);
+        assert_eq!(buffer.rope.to_string(), "work in memory");
+
+        let alternate = dir.join("recovered.md");
+        buffer.save_as(alternate.clone()).unwrap();
+        assert_eq!(buffer.path.as_deref(), Some(alternate.as_path()));
+        assert!(!buffer.dirty);
+        assert_eq!(
+            std::fs::read_to_string(alternate).unwrap(),
+            "work in memory"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

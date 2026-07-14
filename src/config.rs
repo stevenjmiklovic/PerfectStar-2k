@@ -17,6 +17,9 @@ pub struct Config {
     pub menu_delay_ms: u64,
     /// Seconds of idle time before a dirty buffer autosaves; 0 disables.
     pub autosave_secs: u64,
+    /// Number of timestamped rolling backups retained per document; 0 disables
+    /// new rolling backups without deleting copies already on disk.
+    pub backup_depth: usize,
     /// Soft word wrap on startup.
     pub wrap: bool,
     /// Wrap margin in columns; 0 wraps at the window width.
@@ -38,6 +41,7 @@ impl Default for Config {
             theme: String::from("wp-blue"),
             menu_delay_ms: 700,
             autosave_secs: 60,
+            backup_depth: 10,
             wrap: true,
             wrap_margin: 0,
             help_level: 1,
@@ -49,7 +53,11 @@ impl Default for Config {
 }
 
 fn config_path() -> Option<PathBuf> {
-    Some(dirs::config_dir()?.join("perfectstar2k").join("config.toml"))
+    Some(
+        dirs::config_dir()?
+            .join("perfectstar2k")
+            .join("config.toml"),
+    )
 }
 
 impl Config {
@@ -76,5 +84,26 @@ impl Config {
             "courier" => ManuscriptFont::Courier,
             _ => ManuscriptFont::TimesNewRoman,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_config_without_backup_depth_uses_default() {
+        let config: Config = toml::from_str("theme = 'wordstar'\nautosave_secs = 30\n").unwrap();
+
+        assert_eq!(config.theme, "wordstar");
+        assert_eq!(config.autosave_secs, 30);
+        assert_eq!(config.backup_depth, 10);
+    }
+
+    #[test]
+    fn backup_depth_accepts_zero_to_disable_new_backups() {
+        let config: Config = toml::from_str("backup_depth = 0\n").unwrap();
+
+        assert_eq!(config.backup_depth, 0);
     }
 }

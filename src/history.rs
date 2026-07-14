@@ -65,14 +65,26 @@ impl History {
 
     /// Record a user edit. `kind` controls coalescing: consecutive edits of
     /// the same coalescable kind merge into one undo group.
-    pub fn record(&mut self, edit: Edit, kind: EditKind, cursor_before: usize, cursor_after: usize) {
+    pub fn record(
+        &mut self,
+        edit: Edit,
+        kind: EditKind,
+        cursor_before: usize,
+        cursor_after: usize,
+    ) {
         self.undo_ptr = None;
         let coalesce = self.group_open
             && kind != EditKind::Other
             && self.last_kind == Some(kind)
-            && self.log.last().is_some_and(|g| g.edits.len() < MAX_GROUP_EDITS);
+            && self
+                .log
+                .last()
+                .is_some_and(|g| g.edits.len() < MAX_GROUP_EDITS);
         if coalesce {
-            let group = self.log.last_mut().expect("group_open implies non-empty log");
+            let group = self
+                .log
+                .last_mut()
+                .expect("group_open implies non-empty log");
             group.edits.push(edit);
             group.cursor_after = cursor_after;
         } else {

@@ -20,5 +20,10 @@
 # PTY test harness venv and generated fixtures
 /.harness-venv/
 /tests/fixtures/
+!/tests/fixtures/
+/tests/fixtures/*
+!/tests/fixtures/export/
+!/tests/fixtures/export/**
 __pycache__/
 .claude/agents/*
+.kiro/*

@@ -57,21 +57,19 @@ pub fn scan_line(text: &str) -> Vec<(usize, usize, MdKind)> {
                     i += 2;
                 }
             }
-            '*' => {
-                match find_char(&chars, '*', i + 1) {
-                    Some(j)
-                        if j > i + 1
-                            && !chars[i + 1].is_whitespace()
-                            && !chars[j - 1].is_whitespace() =>
-                    {
-                        out.push((i, i + 1, MdKind::Marker));
-                        out.push((i + 1, j, MdKind::Italic));
-                        out.push((j, j + 1, MdKind::Marker));
-                        i = j + 1;
-                    }
-                    _ => i += 1,
+            '*' => match find_char(&chars, '*', i + 1) {
+                Some(j)
+                    if j > i + 1
+                        && !chars[i + 1].is_whitespace()
+                        && !chars[j - 1].is_whitespace() =>
+                {
+                    out.push((i, i + 1, MdKind::Marker));
+                    out.push((i + 1, j, MdKind::Italic));
+                    out.push((j, j + 1, MdKind::Marker));
+                    i = j + 1;
                 }
-            }
+                _ => i += 1,
+            },
             _ => i += 1,
         }
     }
@@ -113,7 +111,10 @@ mod tests {
     #[test]
     fn heading() {
         let spans = scan_line("## Title here");
-        assert_eq!(spans, vec![(0, 3, MdKind::Marker), (3, 13, MdKind::Heading)]);
+        assert_eq!(
+            spans,
+            vec![(0, 3, MdKind::Marker), (3, 13, MdKind::Heading)]
+        );
     }
 
     #[test]
@@ -165,8 +166,14 @@ mod tests {
 
     #[test]
     fn heading_level_parses() {
-        assert_eq!(heading_level("# Chapter One"), Some((1, String::from("Chapter One"))));
-        assert_eq!(heading_level("### Scene   "), Some((3, String::from("Scene"))));
+        assert_eq!(
+            heading_level("# Chapter One"),
+            Some((1, String::from("Chapter One")))
+        );
+        assert_eq!(
+            heading_level("### Scene   "),
+            Some((3, String::from("Scene")))
+        );
         assert_eq!(heading_level("#nope"), None);
         assert_eq!(heading_level("just text"), None);
     }

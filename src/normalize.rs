@@ -74,19 +74,31 @@ pub struct Sub {
 /// this and pass those chars through verbatim.
 pub fn smart_char(chars: &[char], i: usize, prev: Option<char>) -> Option<Sub> {
     match chars[i] {
-        '-' if run_len(chars, i, '-') >= 2 => {
-            Some(Sub { ch: '\u{2014}', consumed: run_len(chars, i, '-') })
-        }
+        '-' if run_len(chars, i, '-') >= 2 => Some(Sub {
+            ch: '\u{2014}',
+            consumed: run_len(chars, i, '-'),
+        }),
         '.' if run_len(chars, i, '.') >= 3 => {
             // Exactly three dots → ellipsis; extra dots stay literal.
-            Some(Sub { ch: '\u{2026}', consumed: 3 })
+            Some(Sub {
+                ch: '\u{2026}',
+                consumed: 3,
+            })
         }
         '"' => Some(Sub {
-            ch: if opens_quote(prev) { '\u{201C}' } else { '\u{201D}' },
+            ch: if opens_quote(prev) {
+                '\u{201C}'
+            } else {
+                '\u{201D}'
+            },
             consumed: 1,
         }),
         '\'' => Some(Sub {
-            ch: if opens_quote(prev) { '\u{2018}' } else { '\u{2019}' },
+            ch: if opens_quote(prev) {
+                '\u{2018}'
+            } else {
+                '\u{2019}'
+            },
             consumed: 1,
         }),
         _ => None,

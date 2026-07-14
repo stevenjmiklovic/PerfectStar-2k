@@ -33,7 +33,11 @@ pub fn banner(word: &str) -> [String; ROWS] {
         }
         let g = glyph(letter);
         for (row, glyph_row) in rows.iter_mut().zip(g.iter()) {
-            row.extend(glyph_row.chars().map(|px| if px == '#' { '█' } else { ' ' }));
+            row.extend(
+                glyph_row
+                    .chars()
+                    .map(|px| if px == '#' { '█' } else { ' ' }),
+            );
         }
     }
     rows

@@ -39,11 +39,7 @@ impl BlockMarks {
 
     /// The range to paint, honoring ^KH.
     pub fn visible_range(&self) -> Option<(usize, usize)> {
-        if self.hidden {
-            None
-        } else {
-            self.range()
-        }
+        if self.hidden { None } else { self.range() }
     }
 
     /// Swap the current block with the remembered previous one (^KU).

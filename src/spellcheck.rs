@@ -59,7 +59,11 @@ impl Spellchecker {
         if !word.chars().any(|c| c.is_alphabetic()) {
             return true;
         }
-        if word.chars().filter(|c| c.is_alphabetic()).all(char::is_uppercase) {
+        if word
+            .chars()
+            .filter(|c| c.is_alphabetic())
+            .all(char::is_uppercase)
+        {
             return true;
         }
         if self.personal.contains(&word.to_lowercase()) {
@@ -80,14 +84,22 @@ impl Spellchecker {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             let _ = writeln!(f, "{w}");
         }
     }
 }
 
 fn personal_dict_path() -> Option<PathBuf> {
-    Some(dirs::config_dir()?.join("perfectstar2k").join("personal_dict.txt"))
+    Some(
+        dirs::config_dir()?
+            .join("perfectstar2k")
+            .join("personal_dict.txt"),
+    )
 }
 
 /// Runs of "word" characters (letters, digits, apostrophes, underscores) in
@@ -127,7 +139,10 @@ mod tests {
 
     #[test]
     fn word_spans_contraction_and_underscore() {
-        assert_eq!(word_spans("don't stop my_var"), vec![(0, 5), (6, 10), (11, 17)]);
+        assert_eq!(
+            word_spans("don't stop my_var"),
+            vec![(0, 5), (6, 10), (11, 17)]
+        );
     }
 
     #[test]

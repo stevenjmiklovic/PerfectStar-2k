@@ -66,33 +66,33 @@ Effort key: **S** ≤ half day · **M** ~1–2 days · **L** ~3–5 days.
 
 ## Phase 1 — P0: Project & Binder (R1)
 
-- [ ] **1.1 [gate] Manifest model + persistence.** Define `ProjectManifest`,
+- [x] **1.1 [gate] Manifest model + persistence.** Define `ProjectManifest`,
   `DocEntry`, `Project`; serde round-trip; atomic load/save via 0.2. **Record
-  [ADR-008] first** (manifest format & location). · Req: R1.1, R1.4 ·
+  [ADR-012] first** (manifest format & location). · Req: R1.1, R1.4 ·
   ADR: D1 · Design §4.1, §7.1 · Files: `project.rs` (new) · **M**
 
-- [ ] **1.2 `App.project` wiring.** Add `project: Option<Project>` to `App`;
+- [x] **1.2 `App.project` wiring.** Add `project: Option<Project>` to `App`;
   `ProjectOpen` command + `InputAction` prompt; guard all project paths on
   `Some` so bare-file launch is unchanged. · Req: R1.8 · Files: `app.rs`,
   `keymap.rs` · **S**
 
-- [ ] **1.3 Binder panel.** `Mode::Binder { entries, selected }` rendered as a
+- [x] **1.3 Binder panel.** `Mode::Binder { entries, selected }` rendered as a
   side panel (reuse split-pane rendering); per-doc title + word count; open
   selected doc via `Pane::open` (session restore automatic). · Req: R1.2, R1.3
   · Design §4.1 · Files: `ui.rs`, `app.rs`, `project.rs` · **M**
 
-- [ ] **1.4 Reorder / add / remove.** `BinderMoveUp/Down`, `ProjectAddDoc`,
+- [x] **1.4 Reorder / add / remove.** `BinderMoveUp/Down`, `ProjectAddDoc`,
   `ProjectRemoveDoc`; atomic manifest rewrite; remove never deletes the file on
   disk. · Req: R1.4, R1.5 · Files: `project.rs`, `app.rs`, `keymap.rs` · **M**
 
-- [ ] **1.5 Missing-file resilience.** Flag missing docs in the binder; open the
+- [x] **1.5 Missing-file resilience.** Flag missing docs in the binder; open the
   rest of the project regardless. · Req: R1.7 · Files: `project.rs`, `ui.rs` · **S**
 
-- [ ] **1.6 Compile.** Concatenate `include_in_compile` docs in order with the
+- [x] **1.6 Compile.** Concatenate `include_in_compile` docs in order with the
   configured separator into an in-memory `CompiledDoc` (feeds Phase 3 export).
   · Req: R1.6 · Design §4.1, §4.7 · Files: `project.rs` · **M**
 
-- [ ] **1.7 Tests.** Manifest round-trip; reorder persistence; missing-file
+- [x] **1.7 Tests.** Manifest round-trip; reorder persistence; missing-file
   open; compile order/separators. · **S**
 
 ---
@@ -101,26 +101,26 @@ Effort key: **S** ≤ half day · **M** ~1–2 days · **L** ~3–5 days.
 
 *Scheduled early: safety underpins every write-heavy feature that follows.*
 
-- [ ] **2.1 [gate] Save-failure handling.** Catch `io::Error` from
+- [x] **2.1 [gate] Save-failure handling.** Catch `io::Error` from
   `Buffer::save` in the `Cmd::Save` arm; keep buffer intact; surface the error;
   offer alternate save location via `InputAction`. Document the never-truncate
   invariant (satisfied by 0.2). · Req: R11.4, R11.5 · Design §4.11 ·
   Files: `app.rs`, `buffer.rs` · **M**
 
-- [ ] **2.2 Crash-recovery journal.** Write buffer text to
+- [x] **2.2 Crash-recovery journal.** Write buffer text to
   `recovery/<stem>-<hash>` on dirty transitions, throttled on the autosave
   tick; clear on clean save/exit. · Req: R11.1, R11.6 · Files: `recovery.rs`
   (new), `app.rs` · **M**
 
-- [ ] **2.3 Recovery-on-startup prompt.** If a recovery file newer than the
+- [x] **2.3 Recovery-on-startup prompt.** If a recovery file newer than the
   on-disk file exists at open, offer restore via `Mode::ConfirmRecover`.
   · Req: R11.1 · Files: `app.rs`, `ui.rs`, `recovery.rs` · **S**
 
-- [ ] **2.4 Rolling backups.** Timestamped copies under `recovery/` (distinct
+- [x] **2.4 Rolling backups.** Timestamped copies under `recovery/` (distinct
   from user snapshots), depth from config `backup_depth`; prune oldest.
   · Req: R11.3 · Files: `recovery.rs`, `config.rs` · **S**
 
-- [ ] **2.5 Tests.** Recovery-journal restore after simulated crash; save-fail
+- [x] **2.5 Tests.** Recovery-journal restore after simulated crash; save-fail
   keeps buffer; backup rotation. · **M**
 
 ---
@@ -129,57 +129,57 @@ Effort key: **S** ≤ half day · **M** ~1–2 days · **L** ~3–5 days.
 
 *Depends on 0.3 (normalizer) and 1.6 (compile).*
 
-- [ ] **3.1 [gate] `CompiledDoc` + `Exporter` trait.** Define the normalized
+- [x] **3.1 [gate] `CompiledDoc` + `Exporter` trait.** Define the normalized
   intermediate (paragraphs, headings, emphasis runs; notes/annotations stripped;
   typographic subst applied via 0.3) and the `Exporter` trait. Refactor `rtf.rs`
   to implement it with **no `^KM` regression** (golden-file test).
   · Req: R7.1, R7.6 · Design §4.7 · Files: `export/mod.rs` (new), `rtf.rs` · **L**
 
-- [ ] **3.2 HTML + plain-text exporters.** Hand-generated, dependency-free;
+- [x] **3.2 HTML + plain-text exporters.** Hand-generated, dependency-free;
   plain-text retains `^KE` behavior. · Req: R7.4 · Files: `export/html.rs`
   (new) · **S**
 
-- [ ] **3.3 [ADR-009] DOCX/EPUB decision.** Record hand-generated zip+XML vs.
+- [x] **3.3 [ADR-013] DOCX/EPUB decision.** Record hand-generated zip+XML vs.
   bundled crate before implementing. · ADR: D2 · Design §7.2 · **S**
 
-- [ ] **3.4 DOCX exporter.** Per 3.3; headings, emphasis, paragraph structure.
+- [x] **3.4 DOCX exporter.** Per 3.3; headings, emphasis, paragraph structure.
   · Req: R7.2 · Files: `export/docx.rs` (new) · **L**
 
-- [ ] **3.5 EPUB exporter.** TOC from headings/binder order. · Req: R7.3 ·
+- [x] **3.5 EPUB exporter.** TOC from headings/binder order. · Req: R7.3 ·
   Files: `export/epub.rs` (new) · **L**
 
-- [ ] **3.6 Export commands + safety.** `ExportDocx/Epub/Html` via path
+- [x] **3.6 Export commands + safety.** `ExportDocx/Epub/Html` via path
   prompts; honor binder order; report output path; temp-then-rename so a prior
   good export is never clobbered on failure; graceful degradation + documented
   deps. · Req: R7.5, R7.7, R7.8 · Files: `app.rs`, `keymap.rs`, `export/mod.rs`
   · **M**
 
-- [ ] **3.7 Tests.** Golden-file per format; compile-order fidelity; failed
+- [x] **3.7 Tests.** Golden-file per format; compile-order fidelity; failed
   export leaves prior output intact. · **M**
 
 ---
 
 ## Phase 4 — P0: Statistics & goals (R2)
 
-- [ ] **4.1 [gate] Incremental word/char count.** Maintain authoritative count
+- [x] **4.1 [gate] Incremental word/char count.** Maintain authoritative count
   on load; update over changed line-range through `insert`/`delete_range`;
   debounced full recount on idle to correct drift. Prove equivalence to full
   count in tests. Use shared normalizer (0.3) for prose count. · Req: R2.1,
   R2.6, R2.7 · Design §4.2 · Files: `stats.rs` (new), `buffer.rs`, `app.rs` · **L**
 
-- [ ] **4.2 Status-line + selection counts.** Doc/project/selection counts in
+- [x] **4.2 Status-line + selection counts.** Doc/project/selection counts in
   the status area; always-on toggle. · Req: R2.1, R2.2 · Files: `ui.rs`,
   `stats.rs` · **S**
 
-- [ ] **4.3 Session goal + progress + notify.** `SetGoal` (words/minutes),
+- [x] **4.3 Session goal + progress + notify.** `SetGoal` (words/minutes),
   live progress, non-blocking completion banner. · Req: R2.3, R2.4 · Files:
   `stats.rs`, `app.rs` · **M**
 
-- [ ] **4.4 Daily words-written history.** Net-words per day per doc/project;
+- [x] **4.4 Daily words-written history.** Net-words per day per doc/project;
   persist to `stats/`; `Mode::Stats` overlay. · Req: R2.5 · Files: `stats.rs`,
   `ui.rs` · **M**
 
-- [ ] **4.5 Tests.** Incremental-vs-full equivalence; net-words delta;
+- [x] **4.5 Tests.** Incremental-vs-full equivalence; net-words delta;
   goal-reached notification. · **S**
 
 ---

@@ -19,6 +19,8 @@ Each ADR documents the context, the decision, and its consequences so future con
 | [ADR-009](./ADR-009-polling-crate-event-loop.md) | Polling crate for lightweight event loop | Accepted | 2025-07-14 |
 | [ADR-010](./ADR-010-cross-platform-mpv-ipc.md) | Cross-platform mpv IPC via trait abstraction | Accepted | 2025-07-14 |
 | [ADR-011](./ADR-011-shell-out-integration-for-radio.md) | Shell-out integration pattern for pstar-radio | Accepted | 2025-07-14 |
+| [ADR-012](./ADR-012-project-manifest-format-and-location.md) | Project manifest format and location | Accepted | 2025-07-14 |
+| [ADR-013](./ADR-013-hand-generated-docx-and-epub.md) | Hand-generated DOCX and EPUB containers | Accepted | 2026-07-14 |
 
 ## Format
 

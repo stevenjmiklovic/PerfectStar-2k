@@ -72,7 +72,9 @@ impl Theme {
             dim: Style::new().fg(dos::LIGHT_CYAN).bg(dos::BLUE),
             block: Style::new().fg(dos::BLUE).bg(dos::WHITE),
             highlight: Style::new().fg(dos::BLACK).bg(dos::YELLOW),
-            misspelled: Style::new().fg(dos::LIGHT_RED).add_modifier(Modifier::UNDERLINED),
+            misspelled: Style::new()
+                .fg(dos::LIGHT_RED)
+                .add_modifier(Modifier::UNDERLINED),
             md_marker: Style::new().fg(dos::LIGHT_CYAN).bg(dos::BLUE),
             md_bold: Style::new()
                 .fg(dos::WHITE)
@@ -98,7 +100,9 @@ impl Theme {
             dim: Style::new().fg(Color::DarkGray).bg(Color::Black),
             block: Style::new().fg(Color::Black).bg(Color::Gray),
             highlight: Style::new().fg(Color::Black).bg(Color::Yellow),
-            misspelled: Style::new().fg(Color::Red).add_modifier(Modifier::UNDERLINED),
+            misspelled: Style::new()
+                .fg(Color::Red)
+                .add_modifier(Modifier::UNDERLINED),
             md_marker: Style::new().fg(Color::DarkGray).bg(Color::Black),
             md_bold: Style::new()
                 .fg(Color::White)
@@ -124,7 +128,9 @@ impl Theme {
             dim: Style::new().add_modifier(ratatui::style::Modifier::DIM),
             block: Style::new().add_modifier(ratatui::style::Modifier::REVERSED),
             highlight: Style::new().fg(Color::Black).bg(Color::Yellow),
-            misspelled: Style::new().fg(Color::Red).add_modifier(Modifier::UNDERLINED),
+            misspelled: Style::new()
+                .fg(Color::Red)
+                .add_modifier(Modifier::UNDERLINED),
             md_marker: Style::new().add_modifier(Modifier::DIM),
             md_bold: Style::new().add_modifier(Modifier::BOLD),
             md_italic: Style::new().add_modifier(Modifier::ITALIC),

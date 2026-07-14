@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
-use ratatui::Frame;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -68,10 +68,25 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let h = text_area.height;
         let p0_h = (h - 2) / 2;
         let p1_h = h - 2 - p0_h;
-        let a0 = Rect { height: p0_h, ..text_area };
-        let m0 = Rect { y: text_area.y + p0_h, height: 1, ..text_area };
-        let a1 = Rect { y: m0.y + 1, height: p1_h, ..text_area };
-        let m1 = Rect { y: a1.y + p1_h, height: 1, ..text_area };
+        let a0 = Rect {
+            height: p0_h,
+            ..text_area
+        };
+        let m0 = Rect {
+            y: text_area.y + p0_h,
+            height: 1,
+            ..text_area
+        };
+        let a1 = Rect {
+            y: m0.y + 1,
+            height: p1_h,
+            ..text_area
+        };
+        let m1 = Rect {
+            y: a1.y + p1_h,
+            height: 1,
+            ..text_area
+        };
         (vec![0usize, 1], vec![a0, a1], vec![m0, m1])
     } else {
         (vec![app.active], vec![text_area], Vec::new())
@@ -107,6 +122,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if matches!(app.mode, Mode::Outline { .. }) {
         draw_outline(frame, app, text_area);
     }
+    if matches!(app.mode, Mode::Binder { .. }) {
+        draw_binder(frame, app, text_area);
+    }
+    if matches!(app.mode, Mode::Stats) {
+        draw_stats_overlay(frame, app, text_area);
+    }
     let active_slot = pane_ids.iter().position(|&p| p == app.active).unwrap_or(0);
     place_cursor(frame, app, pane_areas[active_slot]);
 }
@@ -121,10 +142,13 @@ fn draw_modeline(frame: &mut Frame, app: &App, pane_idx: usize, area: Rect) {
     let line_no = pane.buf.line_of(pane.cursor) + 1;
     let marker = if is_active { "▶" } else { "─" };
     let label = format!("{marker} {}{dirty} ─ Ln {line_no} ", pane.buf.file_name());
-    let fill = "─".repeat(
-        (area.width as usize).saturating_sub(UnicodeWidthStr::width(label.as_str())),
-    );
-    let style = if is_active { app.theme.status } else { app.theme.dim };
+    let fill =
+        "─".repeat((area.width as usize).saturating_sub(UnicodeWidthStr::width(label.as_str())));
+    let style = if is_active {
+        app.theme.status
+    } else {
+        app.theme.dim
+    };
     frame.render_widget(
         Paragraph::new(Line::from(format!("{label}{fill}"))).style(style),
         area,
@@ -161,14 +185,21 @@ fn draw_splash(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::default());
     lines.push(Line::styled(
         PROMPT,
-        app.theme.base.add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK),
+        app.theme
+            .base
+            .add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK),
     ));
     let content_height = lines.len() as u16;
 
     // Too small for the block banner: fall back to plain centered text.
     if area.width < content_width + 6 || area.height < content_height + 2 {
         let y = area.y + area.height.saturating_sub(1) / 2;
-        let fallback_area = Rect { x: area.x, y, width: area.width, height: 1 };
+        let fallback_area = Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: 1,
+        };
         frame.render_widget(
             Paragraph::new(Line::styled("PerfectStar", app.theme.md_heading))
                 .alignment(Alignment::Center)
@@ -204,10 +235,7 @@ fn draw_splash(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
     let hints = " ^KD save · ^KQ quit · ^QF find · ^KB/^KK mark · ^KC copy · ^KV move · ^KP put · ^U undo · Esc commands";
-    frame.render_widget(
-        Paragraph::new(Line::from(hints)).style(app.theme.dim),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(hints)).style(app.theme.dim), area);
 }
 
 fn draw_text(frame: &mut Frame, app: &App, pane_idx: usize, area: Rect) {
@@ -249,7 +277,12 @@ fn draw_text(frame: &mut Frame, app: &App, pane_idx: usize, area: Rect) {
                 }
                 let (text, styles) =
                     line_styles(app, pane, doc_line, query.as_deref(), block_range);
-                lines.push(styled_clip(&text, &styles, pane.left_col, area.width as usize));
+                lines.push(styled_clip(
+                    &text,
+                    &styles,
+                    pane.left_col,
+                    area.width as usize,
+                ));
             }
         }
     }
@@ -456,20 +489,25 @@ fn draw_reveal(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
         }
-        lines.push(styled_clip(&text, &styles, app.left_col, body.width as usize));
+        lines.push(styled_clip(
+            &text,
+            &styles,
+            app.left_col,
+            body.width as usize,
+        ));
     }
     frame.render_widget(Paragraph::new(lines).style(app.theme.base), body);
 }
 
-fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
-    let line_no = app.buf.line_of(app.cursor) + 1;
-    let col_no = app.buf.visual_col(app.cursor) + 1;
-    let dirty = if app.buf.dirty { " •" } else { "" };
-
-    let left = match &app.mode {
+fn status_left(app: &App) -> String {
+    match &app.mode {
         Mode::ConfirmAbandon => {
             format!(" Abandon changes to {}? (y/N)", app.buf.file_name())
         }
+        Mode::ConfirmRecover => format!(
+            " Recover unsaved changes to {}? (y/N · Esc decline)",
+            app.buf.file_name()
+        ),
         Mode::Search(s) => {
             format!(" Find: {}▌  (Enter accept · ^L next · Esc cancel)", s.query)
         }
@@ -487,11 +525,23 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Input { label, value, .. } => format!(" {label}: {value}▌"),
         Mode::Palette { .. } => String::from(" ↑↓ select · Enter run · Esc close"),
         Mode::Outline { .. } => String::from(" ↑↓ select · Enter go to heading · Esc close"),
+        Mode::Binder { .. } => String::from(" ↑↓ select · Enter open document · Esc close"),
+        Mode::Stats => String::from(" Writing Stats · press any key to close"),
         Mode::Normal => match &app.status_msg {
             Some(msg) => format!(" {msg}"),
-            None => format!(" {}{}", app.buf.file_name(), dirty),
+            None => {
+                let dirty = if app.buf.dirty { " •" } else { "" };
+                format!(" {}{}", app.buf.file_name(), dirty)
+            }
         },
-    };
+    }
+}
+
+fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
+    let line_no = app.buf.line_of(app.cursor) + 1;
+    let col_no = app.buf.visual_col(app.cursor) + 1;
+
+    let left = status_left(app);
 
     let pending = match app.prefix {
         Some((p, _)) => match p {
@@ -504,8 +554,32 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     };
     let rec = if app.recording { "● REC  " } else { "" };
     let ins = if app.overtype { "Ovr" } else { "Ins" };
-    let words = app.buf.word_count();
-    let right = format!("{rec}{pending}Ln {line_no}  Col {col_no}  {words} words  {ins} ");
+
+    let words_part = if app.show_word_count {
+        format!("  {} words", app.doc_stats.words)
+    } else {
+        String::new()
+    };
+
+    // Selection count (R2.2): show when a block is active.
+    let sel_part = if let Some((b, e)) = app.blocks.range() {
+        let (sw, sc) = crate::stats::count_slice(&app.buf.rope, b, e);
+        format!("  sel: {sw}w/{sc}c")
+    } else {
+        String::new()
+    };
+
+    // Goal progress (R2.3).
+    let goal_part = if let Some(ref goal) = app.goal {
+        let (current, target) = goal.progress(app.doc_stats.words);
+        format!("  [{current}/{target}]")
+    } else {
+        String::new()
+    };
+
+    let right = format!(
+        "{rec}{pending}Ln {line_no}  Col {col_no}{words_part}{sel_part}{goal_part}  {ins} "
+    );
 
     let width = area.width as usize;
     let left_w = UnicodeWidthStr::width(left.as_str());
@@ -611,10 +685,7 @@ fn place_cursor(frame: &mut Frame, app: &App, area: Rect) {
     if row >= area.height as usize || col >= area.width as usize {
         return;
     }
-    frame.set_cursor_position(Position::new(
-        area.x + col as u16,
-        area.y + row as u16,
-    ));
+    frame.set_cursor_position(Position::new(area.x + col as u16, area.y + row as u16));
 }
 
 /// The command palette: a searchable list of every command (Esc / F1).
@@ -649,7 +720,10 @@ fn draw_palette(frame: &mut Frame, app: &App, text_area: Rect) {
         }
     }
     if entries.is_empty() {
-        lines.push(Line::from(Span::styled(" no matching command", app.theme.dim)));
+        lines.push(Line::from(Span::styled(
+            " no matching command",
+            app.theme.dim,
+        )));
     }
 
     frame.render_widget(Clear, area);
@@ -667,7 +741,12 @@ fn draw_palette(frame: &mut Frame, app: &App, text_area: Rect) {
 /// The outline: Markdown headings in document order, filtered by title,
 /// indented by level. Enter jumps the cursor to the heading.
 fn draw_outline(frame: &mut Frame, app: &App, text_area: Rect) {
-    let Mode::Outline { entries, query, selected } = &app.mode else {
+    let Mode::Outline {
+        entries,
+        query,
+        selected,
+    } = &app.mode
+    else {
         return;
     };
     let q = query.to_lowercase();
@@ -704,9 +783,15 @@ fn draw_outline(frame: &mut Frame, app: &App, text_area: Rect) {
         }
     }
     if entries.is_empty() {
-        lines.push(Line::from(Span::styled(" no headings in this document", app.theme.dim)));
+        lines.push(Line::from(Span::styled(
+            " no headings in this document",
+            app.theme.dim,
+        )));
     } else if matches.is_empty() {
-        lines.push(Line::from(Span::styled(" no matching heading", app.theme.dim)));
+        lines.push(Line::from(Span::styled(
+            " no matching heading",
+            app.theme.dim,
+        )));
     }
 
     frame.render_widget(Clear, area);
@@ -719,4 +804,136 @@ fn draw_outline(frame: &mut Frame, app: &App, text_area: Rect) {
         ),
         area,
     );
+}
+
+/// The binder: project document list with title and word count (^PB, task 1.3).
+fn draw_binder(frame: &mut Frame, app: &App, text_area: Rect) {
+    let Mode::Binder { entries, selected } = &app.mode else {
+        return;
+    };
+
+    let width = (text_area.width.saturating_sub(8)).clamp(40, 70);
+    let max_list = (text_area.height as usize).saturating_sub(4).clamp(3, 14);
+    let height = (entries.len().clamp(1, max_list) + 2) as u16;
+    let area = Rect {
+        x: text_area.x + (text_area.width - width) / 2,
+        y: text_area.y + 1,
+        width,
+        height: height.min(text_area.height),
+    };
+
+    let visible = (area.height as usize).saturating_sub(2);
+    let first = selected.saturating_sub(visible.saturating_sub(1));
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (i, entry) in entries.iter().enumerate().skip(first).take(visible) {
+        let wc_str = match entry.word_count {
+            Some(wc) => format!("{wc} words"),
+            None => String::from("—"),
+        };
+        let missing_marker = if !entry.exists { " [MISSING]" } else { "" };
+        let inner = area.width.saturating_sub(2) as usize;
+        let pad = inner
+            .saturating_sub(entry.title.len() + wc_str.len() + missing_marker.len() + 3)
+            .max(1);
+        let row = format!(
+            " {}{missing_marker}{}{wc_str}  ",
+            entry.title,
+            " ".repeat(pad)
+        );
+
+        if i == *selected {
+            lines.push(Line::from(Span::styled(row, app.theme.block)));
+        } else if !entry.exists {
+            lines.push(Line::from(Span::styled(row, app.theme.dim)));
+        } else {
+            lines.push(Line::from(row));
+        }
+    }
+
+    if entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " (no documents in project)",
+            app.theme.dim,
+        )));
+    }
+
+    let title = if let Some(ref project) = app.project {
+        format!(" Binder: {} ", project.manifest.name)
+    } else {
+        String::from(" Binder ")
+    };
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).style(app.theme.status).block(
+            Block::new()
+                .borders(Borders::ALL)
+                .title(title)
+                .style(app.theme.status),
+        ),
+        area,
+    );
+}
+
+/// The writing statistics overlay (^OI): daily history and current counts.
+fn draw_stats_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    let width = 40u16.min(area.width.saturating_sub(4));
+    let height = 14u16.min(area.height.saturating_sub(2));
+    let x = (area.width.saturating_sub(width)) / 2 + area.x;
+    let y = (area.height.saturating_sub(height)) / 2 + area.y;
+    let overlay = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, overlay);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(format!(
+        " Words: {}  Chars: {}",
+        app.doc_stats.words, app.doc_stats.chars
+    )));
+    lines.push(Line::from(""));
+    if let Some(ref goal) = app.goal {
+        let (current, target) = goal.progress(app.doc_stats.words);
+        let kind = match goal.kind {
+            crate::stats::GoalKind::Words => "words",
+            crate::stats::GoalKind::Minutes => "min",
+        };
+        let status = if goal.reached { " ✓" } else { "" };
+        lines.push(Line::from(format!(
+            " Goal: {current}/{target} {kind}{status}"
+        )));
+    } else {
+        lines.push(Line::from(" Goal: none (^OG to set)"));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(" Today's net words:"));
+    lines.push(Line::from(format!("   {}", app.daily_history.today())));
+    lines.push(Line::from(""));
+    lines.push(Line::from(" Recent days:"));
+    for (date, words) in app.daily_history.recent(5) {
+        lines.push(Line::from(format!("   {date}: {words:+}")));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" Writing Stats ");
+    let para = Paragraph::new(lines).block(block).style(app.theme.status);
+    frame.render_widget(para, overlay);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_mode_renders_keyboard_confirmation_prompt() {
+        let mut app = App::new(None).unwrap();
+        app.mode = Mode::ConfirmRecover;
+
+        let prompt = status_left(&app);
+        assert!(prompt.contains("Recover unsaved changes"));
+        assert!(prompt.contains("y/N"));
+        assert!(prompt.contains("Esc decline"));
+    }
 }

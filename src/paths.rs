@@ -190,7 +190,10 @@ mod tests {
         // Trailing `-<16 hex>` hash.
         let hash = &key[key.len() - 16..];
         assert_eq!(hash.len(), 16);
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "hex hash, got {hash}");
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "hex hash, got {hash}"
+        );
         assert_eq!(key.as_bytes()[key.len() - 17], b'-');
     }
 
