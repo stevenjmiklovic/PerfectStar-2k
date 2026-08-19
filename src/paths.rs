@@ -48,7 +48,6 @@ pub fn projects() -> Option<PathBuf> {
 }
 
 /// Point-in-time document snapshots for the revision viewer.
-#[allow(dead_code)]
 pub fn snapshots() -> Option<PathBuf> {
     subdir("snapshots")
 }

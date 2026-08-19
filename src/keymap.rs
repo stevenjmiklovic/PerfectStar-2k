@@ -124,6 +124,11 @@ pub enum Cmd {
     ProjectFind,
     /// Replace across all project documents (R6.3).
     ProjectReplace,
+    /// Snapshots & revisions
+    /// Take a snapshot of the current document, with an optional label (R4.1).
+    Snapshot,
+    /// List this document's snapshots (R4.3).
+    RevisionsList,
 }
 
 /// How a command is typed.
@@ -454,6 +459,19 @@ pub const BINDINGS: &[Binding] = &[
         chord: Pref(K, 'l'),
         name: "export HTML",
     },
+    // Snapshots live under ^K with the other file-ish commands. Design §5 asked
+    // for ^KL as the revisions list, but ^KL is export HTML; ^KO ("old
+    // versions") keeps the group together without stealing a bound chord.
+    Binding {
+        cmd: Cmd::Snapshot,
+        chord: Pref(K, 'n'),
+        name: "snapshot now",
+    },
+    Binding {
+        cmd: Cmd::RevisionsList,
+        chord: Pref(K, 'o'),
+        name: "revisions / snapshots",
+    },
     // ^O Onscreen
     Binding {
         cmd: Cmd::CycleTheme,
@@ -674,6 +692,28 @@ mod tests {
     #[test]
     fn chord_label_renders_p_prefix() {
         assert_eq!(chord_label(Pref(P, 'b')), "^PB");
+    }
+
+    #[test]
+    fn snapshot_commands_are_bound_without_stealing_a_chord() {
+        assert_eq!(lookup_prefixed(Prefix::K, 'n'), Some(Cmd::Snapshot));
+        assert_eq!(lookup_prefixed(Prefix::K, 'o'), Some(Cmd::RevisionsList));
+        // The chords they might have collided with are untouched.
+        assert_eq!(lookup_prefixed(Prefix::K, 'l'), Some(Cmd::ExportHtml));
+        assert_eq!(lookup_bare('n'), Some(Cmd::InsertBlankLine));
+    }
+
+    #[test]
+    fn every_command_is_reachable_by_name_in_the_palette() {
+        // R12.1/R12.4: the palette is generated from BINDINGS, so a command
+        // with a chord but no descriptive name would ship undiscoverable.
+        let entries = palette_entries();
+        for cmd in [Cmd::Snapshot, Cmd::RevisionsList] {
+            let entry = entries.iter().find(|(c, _, _)| *c == cmd);
+            let (_, name, chord) = entry.expect("command missing from palette");
+            assert!(!name.is_empty(), "{cmd:?} has no name");
+            assert!(chord.starts_with("^K"), "{cmd:?} chord is {chord}");
+        }
     }
 
     #[test]

@@ -224,25 +224,38 @@ Effort key: **S** ≤ half day · **M** ~1–2 days · **L** ~3–5 days.
 
 ## Phase 7 — P0: Snapshots & revision diff (R4)
 
-- [ ] **7.1 [gate] Snapshot store.** Plain-text copies under
+- [x] **7.1 [gate] Snapshot store.** Plain-text copies under
   `snapshots/<stem>-<hash>/`; JSON index (label/timestamp/word-count); write
   failure warns and never touches the buffer. · Req: R4.1, R4.3, R4.6, R4.7 ·
   Design §4.4 · Files: `snapshot.rs` (new) · **M**
 
-- [ ] **7.2 Manual + auto snapshots.** `Snapshot` command (optional label
+- [x] **7.2 Manual + auto snapshots.** `Snapshot` command (optional label
   prompt); auto-snapshot on save/interval with retention `snapshot_keep`.
   · Req: R4.1, R4.2 · Files: `snapshot.rs`, `app.rs`, `config.rs` · **S**
+  **Note:** retention applies to *automatic* snapshots only, per R4.2's wording —
+  a labelled snapshot is never pruned. `snapshot_keep = 0` disables new
+  automatic snapshots without deleting existing ones (same contract as
+  `backup_depth`); `autosnapshot_secs = 0` (default) leaves automatic snapshots
+  to saves alone.
 
-- [ ] **7.3 [ADR-010] Diff engine + revisions list.** Record diff decision
+- [x] **7.3 [ADR-010] Diff engine + revisions list.** Record diff decision
   (adopt `similar`); `Mode::Revisions` list. · Req: R4.3 · ADR: D3 ·
   Design §7.3 · Files: `diff.rs` (new), `ui.rs` · **M**
+  **Note:** recorded as **ADR-014** — ADR-010…013 were taken by the radio work
+  after this spec was written. Chords: `^KN` snapshot, `^KO` revisions (design
+  §5 proposed `^KL`, which is export HTML).
 
-- [ ] **7.4 Diff view + restore.** `Mode::Diff` add/remove highlighting;
+- [x] **7.4 Diff view + restore.** `Mode::Diff` add/remove highlighting;
   restore replaces buffer as a single undoable `EditGroup` (reversible).
   · Req: R4.4, R4.5 · Design §4.4 · Files: `diff.rs`, `app.rs`, `ui.rs` · **M**
 
-- [ ] **7.5 Tests.** Snapshot round-trip + retention; diff correctness; restore
+- [x] **7.5 Tests.** Snapshot round-trip + retention; diff correctness; restore
   is one undo step and reversible. · **S**
+  **Result:** 47 tests across the phase — 20 store, 9 diff engine, 12 app-level
+  (command → prompt → capture, save-triggered retention, revisions list, two-way
+  diff, restore/undo/redo, failure paths), 4 overlay renders via `TestBackend`,
+  2 config. 198 tests pass overall. Plus a PTY end-to-end walk of the whole
+  flow: `tests/harness/smoke_snapshots.py` (^KN → revise → ^KO → diff → ^R → ^U).
 
 ---
 

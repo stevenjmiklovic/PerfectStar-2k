@@ -20,6 +20,17 @@ python3 -m venv .harness-venv
 | `pty_harness.py` | Reusable `PtyHarness` — `pty.fork()` + `pyte` screen mirror. Encapsulates the project's hard-won PTY gotchas (see below). |
 | `gen_manuscript.py` | Deterministic large-manuscript generator. Default 300k words → `tests/fixtures/manuscript-300k.md` (git-ignored; regenerate on demand). |
 | `bench_latency.py` | Opens the fixture, types a burst, measures per-keystroke round-trip latency against a budget. Exits non-zero on regression. |
+| `smoke_snapshots.py` | End-to-end walk of the R4 snapshot flow: `^KN` label → revise → `^KO` list → Enter diff → `^R` restore → `^U` undo. Exits non-zero on any failed screen check. |
+
+## Running the snapshot smoke test
+
+```sh
+.harness-venv/bin/python tests/harness/smoke_snapshots.py
+```
+
+Snapshots are written under the platform metadata root, which macOS does not let
+a test redirect, so the script records the snapshot directories present before
+the run and deletes only the ones it created.
 
 ## Running the latency bench
 

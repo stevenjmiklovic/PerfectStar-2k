@@ -8,6 +8,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode};
 use crate::buffer::{grapheme_width, wrap_segments};
+use crate::diff::DiffTag;
 use crate::keymap;
 use crate::markdown::{self, MdKind};
 use crate::outline;
@@ -130,6 +131,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if matches!(app.mode, Mode::ProjectSearch { .. }) {
         draw_project_search(frame, app, text_area);
+    }
+    if matches!(app.mode, Mode::Revisions { .. }) {
+        draw_revisions(frame, app, text_area);
+    }
+    if matches!(app.mode, Mode::Diff { .. }) {
+        draw_diff(frame, app, text_area);
     }
     let active_slot = pane_ids.iter().position(|&p| p == app.active).unwrap_or(0);
     place_cursor(frame, app, pane_areas[active_slot]);
@@ -537,6 +544,17 @@ fn status_left(app: &App) -> String {
                 results.len()
             )
         }
+        Mode::Revisions { entries, .. } => match &app.status_msg {
+            Some(msg) => format!(" {msg}"),
+            None => format!(
+                " {} snapshot(s) · ↑↓ select · Enter diff · Space mark · ^R restore · Esc close",
+                entries.len()
+            ),
+        },
+        Mode::Diff { .. } => match &app.status_msg {
+            Some(msg) => format!(" {msg}"),
+            None => String::from(" ↑↓ scroll · ^R restore the older version · Esc close"),
+        },
         Mode::Normal => match &app.status_msg {
             Some(msg) => format!(" {msg}"),
             None => {
@@ -664,7 +682,10 @@ fn draw_prefix_menu(frame: &mut Frame, app: &App, text_area: Rect) {
 
 fn place_cursor(frame: &mut Frame, app: &App, area: Rect) {
     // While an overlay is open, the terminal cursor stays out of the text.
-    if matches!(app.mode, Mode::Palette { .. } | Mode::Outline { .. }) {
+    if matches!(
+        app.mode,
+        Mode::Palette { .. } | Mode::Outline { .. } | Mode::Revisions { .. } | Mode::Diff { .. }
+    ) {
         return;
     }
     let line = app.buf.line_of(app.cursor);
@@ -989,9 +1010,255 @@ fn draw_project_search(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(para, overlay);
 }
 
+/// The revisions list: this document's snapshots, newest first (^KO, R4.3).
+fn draw_revisions(frame: &mut Frame, app: &App, text_area: Rect) {
+    let Mode::Revisions {
+        entries,
+        selected,
+        compare,
+    } = &app.mode
+    else {
+        return;
+    };
+
+    let width = (text_area.width.saturating_sub(4)).clamp(40, 72);
+    let max_list = (text_area.height as usize).saturating_sub(4).clamp(3, 16);
+    let height = (entries.len().clamp(1, max_list) + 2) as u16;
+    let area = Rect {
+        x: text_area.x + (text_area.width.saturating_sub(width)) / 2,
+        y: text_area.y + 1,
+        width,
+        height: height.min(text_area.height),
+    };
+
+    let visible = (area.height as usize).saturating_sub(2);
+    let first = selected.saturating_sub(visible.saturating_sub(1));
+    let inner = area.width.saturating_sub(2) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (i, entry) in entries.iter().enumerate().skip(first).take(visible) {
+        // The mark shows which version Enter will compare against.
+        let mark = if *compare == Some(i) { "◆" } else { " " };
+        let words = format!("{} words", entry.words);
+        let label = entry.display_label();
+        let left = format!("{mark} {} {label}", entry.display_time());
+        let pad = inner
+            .saturating_sub(left.width() + words.width() + 2)
+            .max(1);
+        let row = format!(" {left}{}{words} ", " ".repeat(pad));
+
+        if i == *selected {
+            lines.push(Line::from(Span::styled(row, app.theme.block)));
+        } else if entry.auto {
+            // The editor's own copies read quieter than the writer's.
+            lines.push(Line::from(Span::styled(row, app.theme.dim)));
+        } else {
+            lines.push(Line::from(row));
+        }
+    }
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).style(app.theme.status).block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(format!(" Revisions: {} ", app.buf.file_name()))
+                .style(app.theme.status),
+        ),
+        area,
+    );
+}
+
+/// The diff view: added and removed lines between two versions (R4.4).
+fn draw_diff(frame: &mut Frame, app: &App, text_area: Rect) {
+    let Mode::Diff {
+        title,
+        lines: diff_lines,
+        scroll,
+        ..
+    } = &app.mode
+    else {
+        return;
+    };
+
+    let area = text_area;
+    let visible = (area.height as usize).saturating_sub(2);
+    let mut lines: Vec<Line> = Vec::new();
+
+    for line in diff_lines.iter().skip(*scroll).take(visible) {
+        let (sign, style) = match line.tag {
+            DiffTag::Insert => ("+", app.theme.diff_added),
+            DiffTag::Delete => ("−", app.theme.diff_removed),
+            DiffTag::Equal => (" ", app.theme.status),
+            DiffTag::Gap => (" ", app.theme.dim),
+        };
+        // Line numbers orient the writer in the draft, not just in the diff.
+        let number = match (line.tag, line.new_line, line.old_line) {
+            (DiffTag::Gap, _, _) => String::from("    "),
+            (DiffTag::Delete, _, Some(n)) => format!("{n:>4}"),
+            (_, Some(n), _) => format!("{n:>4}"),
+            _ => String::from("    "),
+        };
+        let body: String = line
+            .text
+            .chars()
+            .take((area.width as usize).saturating_sub(9))
+            .collect();
+        lines.push(Line::from(Span::styled(
+            format!(" {number} {sign} {body}"),
+            style,
+        )));
+    }
+
+    let position = if diff_lines.len() > visible {
+        format!(
+            " [{}/{}] ",
+            (*scroll + visible).min(diff_lines.len()),
+            diff_lines.len()
+        )
+    } else {
+        String::new()
+    };
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).style(app.theme.status).block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(format!(" {title} "))
+                .title_bottom(position)
+                .style(app.theme.status),
+        ),
+        area,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff::DiffLine;
+    use crate::snapshot::SnapshotEntry;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// Render one frame and return the screen as text lines. Exercises the real
+    /// draw path, so a width/unicode mistake in an overlay fails here instead of
+    /// crashing the editor in front of a writer.
+    fn screen(app: &mut App) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn entry(label: Option<&str>, timestamp: u64, words: usize, auto: bool) -> SnapshotEntry {
+        SnapshotEntry {
+            file: format!("20240101T000000.000Z-{timestamp}.txt"),
+            label: label.map(str::to_owned),
+            timestamp,
+            words,
+            auto,
+        }
+    }
+
+    #[test]
+    fn revisions_overlay_lists_versions_with_time_label_and_words() {
+        let mut app = App::new(None).unwrap();
+        app.splash = false;
+        app.mode = Mode::Revisions {
+            entries: vec![
+                entry(Some("before the cut"), 1_704_067_500, 1234, false),
+                entry(None, 1_704_067_200, 1200, true),
+            ],
+            selected: 0,
+            compare: Some(1),
+        };
+
+        let screen = screen(&mut app).join("\n");
+        assert!(screen.contains("Revisions"), "{screen}");
+        assert!(screen.contains("before the cut"), "{screen}");
+        assert!(screen.contains("1234 words"), "{screen}");
+        // The automatic version reads as "auto", and the marked one is flagged.
+        assert!(screen.contains("auto"), "{screen}");
+        assert!(screen.contains('◆'), "{screen}");
+        assert!(screen.contains("^R restore"), "{screen}");
+    }
+
+    #[test]
+    fn diff_overlay_marks_added_and_removed_lines() {
+        let mut app = App::new(None).unwrap();
+        app.splash = false;
+        app.mode = Mode::Diff {
+            title: String::from("13:45 before the cut → current draft  +1 −1"),
+            lines: crate::diff::lines("one\ntwo\nthree\n", "one\ntwo and a half\nthree\n"),
+            scroll: 0,
+            restore: None,
+        };
+
+        let lines = screen(&mut app);
+        let screen = lines.join("\n");
+        assert!(screen.contains("before the cut"), "{screen}");
+        assert!(screen.contains("+ two and a half"), "{screen}");
+        assert!(screen.contains("− two"), "{screen}");
+        // Removed lines carry the old line number, added ones the new.
+        assert!(screen.contains("   2 − two"), "{screen}");
+        assert!(screen.contains("   2 + two and a half"), "{screen}");
+    }
+
+    #[test]
+    fn diff_overlay_survives_a_narrow_terminal_and_long_lines() {
+        let mut app = App::new(None).unwrap();
+        app.splash = false;
+        app.mode = Mode::Diff {
+            title: String::from("a very long comparison title that will not fit at all"),
+            lines: vec![DiffLine {
+                tag: crate::diff::DiffTag::Insert,
+                // Wide and combining characters: naive char-count clipping is
+                // exactly what breaks terminal rendering.
+                text: "日本語のテキスト ".repeat(20),
+                old_line: None,
+                new_line: Some(1),
+            }],
+            scroll: 0,
+            restore: None,
+        };
+
+        let mut terminal = Terminal::new(TestBackend::new(20, 6)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    }
+
+    #[test]
+    fn scrolled_diff_shows_a_position_indicator() {
+        let mut app = App::new(None).unwrap();
+        app.splash = false;
+        let many = (0..80)
+            .map(|i| DiffLine {
+                tag: crate::diff::DiffTag::Equal,
+                text: format!("line {i}"),
+                old_line: Some(i + 1),
+                new_line: Some(i + 1),
+            })
+            .collect();
+        app.mode = Mode::Diff {
+            title: String::from("old → new"),
+            lines: many,
+            scroll: 40,
+            restore: None,
+        };
+
+        let screen = screen(&mut app).join("\n");
+        assert!(screen.contains("line 40"), "{screen}");
+        assert!(!screen.contains("line 39"), "scrolled past: {screen}");
+        assert!(screen.contains("/80"), "{screen}");
+    }
 
     #[test]
     fn recovery_mode_renders_keyboard_confirmation_prompt() {

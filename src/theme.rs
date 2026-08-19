@@ -55,6 +55,12 @@ pub struct Theme {
     /// (a misspelled word inside **bold** still looks bold) rather than
     /// replacing it.
     pub misspelled: Style,
+    /// Added line in the revision diff view (R4.4). A full-row band rather than
+    /// a coloured foreground, so add/remove reads at a glance on the overlay's
+    /// own background.
+    pub diff_added: Style,
+    /// Removed line in the revision diff view.
+    pub diff_removed: Style,
     // Markdown styling
     pub md_marker: Style,
     pub md_bold: Style,
@@ -75,6 +81,8 @@ impl Theme {
             misspelled: Style::new()
                 .fg(dos::LIGHT_RED)
                 .add_modifier(Modifier::UNDERLINED),
+            diff_added: Style::new().fg(dos::BLACK).bg(dos::LIGHT_GREEN),
+            diff_removed: Style::new().fg(dos::BLACK).bg(dos::LIGHT_RED),
             md_marker: Style::new().fg(dos::LIGHT_CYAN).bg(dos::BLUE),
             md_bold: Style::new()
                 .fg(dos::WHITE)
@@ -103,6 +111,8 @@ impl Theme {
             misspelled: Style::new()
                 .fg(Color::Red)
                 .add_modifier(Modifier::UNDERLINED),
+            diff_added: Style::new().fg(Color::Black).bg(Color::Green),
+            diff_removed: Style::new().fg(Color::Black).bg(Color::Red),
             md_marker: Style::new().fg(Color::DarkGray).bg(Color::Black),
             md_bold: Style::new()
                 .fg(Color::White)
@@ -131,6 +141,12 @@ impl Theme {
             misspelled: Style::new()
                 .fg(Color::Red)
                 .add_modifier(Modifier::UNDERLINED),
+            // REVERSED turns the foreground into the band, matching how this
+            // theme draws every other highlight without naming a background.
+            diff_added: Style::new()
+                .fg(Color::Green)
+                .add_modifier(Modifier::REVERSED),
+            diff_removed: Style::new().fg(Color::Red).add_modifier(Modifier::REVERSED),
             md_marker: Style::new().add_modifier(Modifier::DIM),
             md_bold: Style::new().add_modifier(Modifier::BOLD),
             md_italic: Style::new().add_modifier(Modifier::ITALIC),

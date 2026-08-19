@@ -4,10 +4,12 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
+use ropey::Rope;
 
 use crate::block::adjust_pos;
 use crate::buffer::wrap_segments;
 use crate::config::Config;
+use crate::diff::{self, DiffLine};
 use crate::export::docx::DocxExporter;
 use crate::export::epub::EpubExporter;
 use crate::export::html::{HtmlExporter, PlainTextExporter};
@@ -23,6 +25,7 @@ use crate::projsearch;
 use crate::recovery::{self, Journal};
 use crate::rtf;
 use crate::search::{ReplacePhase, ReplaceState, SearchState};
+use crate::snapshot::{SnapshotEntry, SnapshotStore};
 use crate::spellcheck;
 use crate::stats::{DailyHistory, DocStats, GoalKind, SessionGoal};
 use crate::theme::Theme;
@@ -60,6 +63,9 @@ pub enum InputAction {
     ProjectSearch,
     /// Project-wide replace: "find|replace" format (^PW).
     ProjectReplace,
+    /// Optional label for a snapshot taken with ^KN (R4.1). Unlike every other
+    /// prompt, an empty answer is meaningful: take the snapshot unlabelled.
+    SnapshotLabel,
 }
 
 /// What the keyboard is currently driving.
@@ -101,6 +107,24 @@ pub enum Mode {
         selected: usize,
         /// Whether to enter replace mode after search.
         replace_with: Option<String>,
+    },
+    /// This document's snapshots, newest first (R4.3, task 7.3).
+    Revisions {
+        entries: Vec<SnapshotEntry>,
+        selected: usize,
+        /// A version marked with Space, to compare against instead of the
+        /// current draft (R4.4: "two snapshots, or a snapshot and current").
+        compare: Option<usize>,
+    },
+    /// A rendered comparison between two versions (R4.4, task 7.4).
+    Diff {
+        /// What is being compared, e.g. "13:45 before the cut → current draft".
+        title: String,
+        lines: Vec<DiffLine>,
+        /// First visible diff line.
+        scroll: usize,
+        /// The older version on display, offered for restore with ^R (R4.5).
+        restore: Option<SnapshotEntry>,
     },
 }
 
@@ -160,8 +184,20 @@ pub struct App {
     autosave: Duration,
     /// Maximum timestamped rolling backups retained per saved document.
     backup_depth: usize,
+    /// Automatic snapshots retained per document; 0 disables taking new ones
+    /// (R4.2). Manual snapshots are never pruned.
+    snapshot_keep: usize,
+    /// Idle cadence for automatic snapshots; zero leaves them to saves alone.
+    autosnapshot: Duration,
+    /// When the idle cadence last fired; starts at launch so the first
+    /// automatic snapshot is a full interval in, not on the first idle tick.
+    /// Deliberately app-wide rather than per-pane: it's a cadence, and one clock
+    /// keeps two dirty windows from drifting into alternating snapshots.
+    last_autosnapshot: Instant,
     /// Metadata root for crash journals and the distinct `backups/` tree.
     backup_root: Option<PathBuf>,
+    /// Root of the per-document snapshot tree; `None` disables snapshots.
+    snapshot_root: Option<PathBuf>,
     /// One plain-text crash journal per pane, kept index-aligned with `panes`.
     recovery_journals: Vec<Journal>,
     /// Recovery text is loaded before prompting so a disappearing record can
@@ -238,7 +274,18 @@ impl App {
             manuscript_font: config.manuscript_font(),
             autosave: Duration::from_secs(config.autosave_secs),
             backup_depth: config.backup_depth,
+            snapshot_keep: config.snapshot_keep,
+            autosnapshot: Duration::from_secs(config.autosnapshot_secs),
+            last_autosnapshot: Instant::now(),
             backup_root: crate::paths::recovery(),
+            // A snapshot is a full copy of the document, so tests must never
+            // default into the writer's real metadata tree; the ones that
+            // exercise snapshots point this at a temporary directory.
+            snapshot_root: if cfg!(test) {
+                None
+            } else {
+                crate::paths::snapshots()
+            },
             recovery_journals: vec![recovery_journal],
             pending_recovery: None,
             macro_keys: Vec::new(),
@@ -304,6 +351,13 @@ impl App {
         let deadline = self.autosave;
         let backup_depth = self.backup_depth;
         let backup_root = self.backup_root.clone();
+        let snapshot_keep = self.snapshot_keep;
+        let snapshot_root = self.snapshot_root.clone();
+        // The idle snapshot cadence starts counting from the first idle tick,
+        // so a session that never idles never owes one.
+        let cadence_due =
+            !self.autosnapshot.is_zero() && self.last_autosnapshot.elapsed() >= self.autosnapshot;
+        let mut cadence_fired = false;
         let mut autosaved = false;
         let mut warnings = Vec::new();
         let (panes, journals) = (&mut self.panes, &mut self.recovery_journals);
@@ -315,6 +369,21 @@ impl App {
 
             if let Err(error) = journal.write_if_changed(&pane.buf.rope, pane.last_edit) {
                 warnings.push(format!("Recovery write failed: {error}"));
+            }
+
+            // An interval snapshot of work in progress (R4.2). Taken before the
+            // autosave below so the version on record is the one being edited,
+            // and never at the cost of the save if it fails.
+            if cadence_due {
+                cadence_fired = true;
+                if let Err(error) = auto_snapshot(
+                    snapshot_root.as_deref(),
+                    pane.buf.path.as_deref(),
+                    &pane.buf.rope,
+                    snapshot_keep,
+                ) {
+                    warnings.push(format!("Snapshot failed: {error}"));
+                }
             }
 
             if !deadline.is_zero()
@@ -331,6 +400,18 @@ impl App {
                         ) {
                             warnings.push(format!("Rolling backup failed: {error}"));
                         }
+                        // R4.2: a snapshot per saved version. Skipped when the
+                        // cadence just took one of identical text.
+                        if !cadence_due
+                            && let Err(error) = auto_snapshot(
+                                snapshot_root.as_deref(),
+                                pane.buf.path.as_deref(),
+                                &pane.buf.rope,
+                                snapshot_keep,
+                            )
+                        {
+                            warnings.push(format!("Snapshot failed: {error}"));
+                        }
                         if let Err(error) = journal.clear() {
                             warnings.push(format!("Recovery cleanup failed: {error}"));
                         }
@@ -342,6 +423,10 @@ impl App {
                     }
                 }
             }
+        }
+
+        if cadence_fired {
+            self.last_autosnapshot = Instant::now();
         }
 
         if !warnings.is_empty() {
@@ -481,6 +566,8 @@ impl App {
             Mode::Binder { .. } => self.handle_binder_key(key),
             Mode::Stats => self.mode = Mode::Normal,
             Mode::ProjectSearch { .. } => self.handle_project_search_key(key),
+            Mode::Revisions { .. } => self.handle_revisions_key(key),
+            Mode::Diff { .. } => self.handle_diff_key(key),
             Mode::Normal => self.handle_normal_key(key),
         }
     }
@@ -1085,6 +1172,22 @@ impl App {
                     self.status_msg = Some(String::from("No project loaded (^PP to open)"));
                 }
             }
+            Cmd::Snapshot => {
+                if self.buf.path.is_some() {
+                    self.mode = Mode::Input {
+                        label: String::from("Snapshot label (Enter for none)"),
+                        value: String::new(),
+                        action: InputAction::SnapshotLabel,
+                    };
+                } else {
+                    // Snapshots are keyed by the document's path; an unsaved
+                    // buffer would file them under a name nothing can find again.
+                    self.status_msg = Some(String::from(
+                        "Save the document first, then ^KN snapshots it",
+                    ));
+                }
+            }
+            Cmd::RevisionsList => self.open_revisions(),
         }
         if !matches!(cmd, Cmd::Undo) && !is_edit_cmd(cmd) {
             self.history.break_group();
@@ -1695,7 +1798,9 @@ impl App {
             KeyCode::Enter => {
                 let path = value.trim().to_string();
                 self.mode = Mode::Normal;
-                if path.is_empty() {
+                // An empty answer cancels every prompt that needs a path, but a
+                // snapshot without a label is a perfectly good snapshot.
+                if path.is_empty() && action != InputAction::SnapshotLabel {
                     return;
                 }
                 match action {
@@ -1745,6 +1850,10 @@ impl App {
                                 Some(String::from("Enter a positive number of words"));
                         }
                     },
+                    InputAction::SnapshotLabel => {
+                        let label = (!path.is_empty()).then_some(path.as_str());
+                        self.take_snapshot(label);
+                    }
                     InputAction::ProjectSearch => self.run_project_search(&path, None),
                     InputAction::ProjectReplace => {
                         // Format: "find|replace"
@@ -2138,6 +2247,17 @@ impl App {
             self.backup_depth,
         ) {
             warnings.push(format!("rolling backup failed: {error}"));
+        }
+        // R4.2: every saved version gets an automatic snapshot. A snapshot
+        // failure is reported but never turns a good save into a bad one.
+        let active = self.active;
+        if let Err(error) = auto_snapshot(
+            self.snapshot_root.as_deref(),
+            source.as_deref(),
+            &self.panes[active].buf.rope,
+            self.snapshot_keep,
+        ) {
+            warnings.push(format!("snapshot failed: {error}"));
         }
         if let Err(error) = self.recovery_journals[self.active].clear() {
             warnings.push(format!("recovery cleanup failed: {error}"));
@@ -2806,6 +2926,315 @@ impl App {
         self.mode = Mode::Normal;
         self.status_msg = Some(format!("{count} replacement(s) made"));
     }
+
+    // --- snapshots & revisions (R4) ------------------------------------------
+
+    /// The snapshot store for the active document, or `None` with a status
+    /// message explaining why this document can't have snapshots.
+    fn active_snapshot_store(&mut self) -> Option<SnapshotStore> {
+        let Some(path) = self.buf.path.clone() else {
+            self.status_msg = Some(String::from(
+                "Save the document first — snapshots are keyed to its path",
+            ));
+            return None;
+        };
+        let Some(root) = self.snapshot_root.clone() else {
+            self.status_msg = Some(String::from(
+                "No metadata directory available for snapshots",
+            ));
+            return None;
+        };
+        Some(SnapshotStore::for_file_in(&root, &path))
+    }
+
+    /// ^KN: snapshot the current text, with an optional label (R4.1).
+    fn take_snapshot(&mut self, label: Option<&str>) {
+        let Some(mut store) = self.active_snapshot_store() else {
+            return;
+        };
+        let active = self.active;
+        // The rope is only borrowed: a failed snapshot leaves the working
+        // buffer exactly as it was, and says so (R4.6).
+        match store.capture(&self.panes[active].buf.rope, label) {
+            Ok(entry) => {
+                let named = match entry.label.as_deref() {
+                    Some(label) => format!(" \"{label}\""),
+                    None => String::new(),
+                };
+                self.status_msg = Some(format!(
+                    "Snapshot{named} saved — {} words (^KO to list)",
+                    entry.words
+                ));
+            }
+            Err(error) => self.status_msg = Some(format!("Snapshot failed: {error}")),
+        }
+    }
+
+    /// ^KO: this document's snapshots, newest first (R4.3).
+    fn open_revisions(&mut self) {
+        if matches!(self.mode, Mode::Revisions { .. }) {
+            self.mode = Mode::Normal;
+            return;
+        }
+        let Some(store) = self.active_snapshot_store() else {
+            return;
+        };
+        // The store keeps them oldest-first; a writer looking for "the version
+        // before lunch" starts from the newest.
+        let entries: Vec<SnapshotEntry> = store.entries().iter().rev().cloned().collect();
+        if entries.is_empty() {
+            self.status_msg = Some(String::from(
+                "No snapshots of this document yet (^KN takes one)",
+            ));
+            return;
+        }
+        self.mode = Mode::Revisions {
+            entries,
+            selected: 0,
+            compare: None,
+        };
+    }
+
+    fn handle_revisions_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let (count, selected) = match &self.mode {
+            Mode::Revisions {
+                entries, selected, ..
+            } => (entries.len(), *selected),
+            _ => return,
+        };
+        let last = count.saturating_sub(1);
+        let new_selected = match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            KeyCode::Enter => {
+                self.revisions_diff(selected);
+                return;
+            }
+            KeyCode::Char('r') if ctrl => {
+                self.restore_selected_revision(selected);
+                return;
+            }
+            KeyCode::Char(' ') => {
+                self.revisions_mark(selected);
+                return;
+            }
+            KeyCode::Up => selected.saturating_sub(1),
+            KeyCode::Down => selected + 1,
+            KeyCode::Char('e') if ctrl => selected.saturating_sub(1),
+            KeyCode::Char('x') if ctrl => selected + 1,
+            KeyCode::Home => 0,
+            KeyCode::End => last,
+            _ => return,
+        };
+        if let Mode::Revisions { selected, .. } = &mut self.mode {
+            *selected = new_selected.min(last);
+        }
+    }
+
+    /// Space: mark (or unmark) a version to compare against instead of the
+    /// current draft (R4.4).
+    fn revisions_mark(&mut self, selected: usize) {
+        let Mode::Revisions {
+            entries,
+            compare,
+            selected: cursor,
+        } = &mut self.mode
+        else {
+            return;
+        };
+        *compare = if *compare == Some(selected) {
+            None
+        } else {
+            Some(selected)
+        };
+        let marked = compare.is_some();
+        // Marking is a two-step gesture; move on so Enter lands on the *other*
+        // version rather than diffing the marked one against itself.
+        if marked && *cursor + 1 < entries.len() {
+            *cursor += 1;
+        }
+        self.status_msg = Some(String::from(if marked {
+            "Marked for comparison — Enter on another version to diff them"
+        } else {
+            "Comparison mark cleared"
+        }));
+    }
+
+    /// Enter: diff the selected version against the marked one, or against the
+    /// current draft when nothing is marked (R4.4).
+    fn revisions_diff(&mut self, selected: usize) {
+        let (entries, compare) = match &self.mode {
+            Mode::Revisions {
+                entries, compare, ..
+            } => (entries.clone(), *compare),
+            _ => return,
+        };
+        let Some(chosen) = entries.get(selected).cloned() else {
+            return;
+        };
+        let Some(store) = self.active_snapshot_store() else {
+            return;
+        };
+
+        // Whichever version was marked, the diff reads chronologically:
+        // older on the left, newer on the right.
+        let marked = compare
+            .and_then(|i| entries.get(i).cloned())
+            .filter(|marked| marked.file != chosen.file);
+        let (older, newer) = match marked {
+            Some(marked) => {
+                if (marked.timestamp, &marked.file) <= (chosen.timestamp, &chosen.file) {
+                    (marked, Some(chosen))
+                } else {
+                    (chosen, Some(marked))
+                }
+            }
+            None => (chosen, None),
+        };
+
+        let old_text = match store.read_text(&older) {
+            Ok(text) => text,
+            Err(error) => {
+                self.status_msg = Some(format!("Cannot read snapshot: {error}"));
+                return;
+            }
+        };
+        let (new_text, new_title) = match &newer {
+            Some(entry) => match store.read_text(entry) {
+                Ok(text) => (text, revision_title(entry)),
+                Err(error) => {
+                    self.status_msg = Some(format!("Cannot read snapshot: {error}"));
+                    return;
+                }
+            },
+            None => (
+                self.panes[self.active].buf.rope.to_string(),
+                String::from("current draft"),
+            ),
+        };
+
+        let lines = diff::lines(&old_text, &new_text);
+        if lines.is_empty() {
+            // Stay in the list; there is nothing to show and closing it would
+            // read as a failure.
+            self.status_msg = Some(format!(
+                "{} and {new_title} are identical",
+                revision_title(&older)
+            ));
+            return;
+        }
+        let summary = diff::summarize(&lines);
+        self.mode = Mode::Diff {
+            title: format!(
+                "{} → {new_title}  +{} −{}",
+                revision_title(&older),
+                summary.added,
+                summary.removed
+            ),
+            lines,
+            scroll: 0,
+            restore: Some(older),
+        };
+    }
+
+    fn handle_diff_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let page = self.view_rows.max(1);
+        let (count, scroll, restore) = match &self.mode {
+            Mode::Diff {
+                lines,
+                scroll,
+                restore,
+                ..
+            } => (lines.len(), *scroll, restore.clone()),
+            _ => return,
+        };
+        let last = count.saturating_sub(1);
+        let new_scroll = match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            KeyCode::Char('r') if ctrl => {
+                match restore {
+                    Some(entry) => self.restore_snapshot(&entry),
+                    None => self.status_msg = Some(String::from("Nothing to restore here")),
+                }
+                return;
+            }
+            KeyCode::Up => scroll.saturating_sub(1),
+            KeyCode::Down => scroll + 1,
+            KeyCode::Char('e') if ctrl => scroll.saturating_sub(1),
+            KeyCode::Char('x') if ctrl => scroll + 1,
+            KeyCode::PageUp => scroll.saturating_sub(page),
+            KeyCode::PageDown => scroll + page,
+            KeyCode::Home => 0,
+            KeyCode::End => last,
+            _ => return,
+        };
+        if let Mode::Diff { scroll, .. } = &mut self.mode {
+            *scroll = new_scroll.min(last);
+        }
+    }
+
+    fn restore_selected_revision(&mut self, selected: usize) {
+        let entry = match &self.mode {
+            Mode::Revisions { entries, .. } => entries.get(selected).cloned(),
+            _ => None,
+        };
+        if let Some(entry) = entry {
+            self.restore_snapshot(&entry);
+        }
+    }
+
+    /// Replace the buffer with a snapshot's text as one undoable edit (R4.5).
+    ///
+    /// Restoration goes through the ordinary edit path rather than swapping the
+    /// rope, so ^U takes the whole restore back in a single step and the version
+    /// it replaced is never lost (ADR-003). A read failure leaves the buffer
+    /// untouched.
+    fn restore_snapshot(&mut self, entry: &SnapshotEntry) {
+        let Some(store) = self.active_snapshot_store() else {
+            return;
+        };
+        let text = match store.read_text(entry) {
+            Ok(text) => text,
+            Err(error) => {
+                self.status_msg = Some(format!("Restore failed: {error}"));
+                return;
+            }
+        };
+
+        // Bracketed by group breaks so the restore neither absorbs the edits
+        // before it nor gets absorbed by the ones after: exactly one undo step.
+        self.history.break_group();
+        let old_len = self.buf.len_chars();
+        let cursor_after = self.cursor.min(text.chars().count());
+        self.apply_edit(0, old_len, &text, EditKind::Other, cursor_after);
+        self.history.break_group();
+
+        let active = self.active;
+        self.doc_stats = DocStats::from_rope(&self.panes[active].buf.rope);
+        self.mode = Mode::Normal;
+        self.status_msg = Some(format!(
+            "Restored {} — ^U to undo, ^KS to keep",
+            revision_title(entry)
+        ));
+    }
+}
+
+/// How a version is named in the revisions list, the diff title, and status
+/// messages: its timestamp, plus the writer's label when it has one.
+fn revision_title(entry: &SnapshotEntry) -> String {
+    let label = entry.display_label();
+    if label.is_empty() {
+        entry.display_time()
+    } else {
+        format!("{} {label}", entry.display_time())
+    }
 }
 
 fn write_backup_after_save(
@@ -2819,6 +3248,30 @@ fn write_backup_after_save(
     let root = root.ok_or_else(|| io::Error::other("metadata directory is unavailable"))?;
     let source = source.ok_or_else(|| io::Error::other("saved document has no path"))?;
     recovery::write_rolling_backup(root, source, depth).map(|_| ())
+}
+
+/// Take an automatic snapshot of a document and apply retention (R4.2).
+///
+/// A free function so the autosave sweep can call it while holding a mutable
+/// borrow of the pane list. Quietly does nothing when automatic snapshots are
+/// off (`snapshot_keep = 0`), when the buffer has no path to key snapshots by,
+/// or when the platform offers no metadata directory — none of those are
+/// failures the writer needs to hear about mid-sentence.
+fn auto_snapshot(
+    root: Option<&Path>,
+    source: Option<&Path>,
+    rope: &Rope,
+    keep: usize,
+) -> io::Result<()> {
+    if keep == 0 {
+        return Ok(());
+    }
+    let (Some(root), Some(source)) = (root, source) else {
+        return Ok(());
+    };
+    let mut store = SnapshotStore::for_file_in(root, source);
+    store.capture_auto(rope)?;
+    store.prune_auto(keep).map(|_| ())
 }
 
 fn is_word(c: char) -> bool {
@@ -2860,991 +3313,5 @@ fn prefix_caret(prefix: Prefix) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::project::{DocEntry, ProjectManifest};
-    use ropey::Rope;
-
-    fn scratch_dir(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("pstar-app-{tag}-{}-{id}", std::process::id()))
-    }
-
-    #[test]
-    fn save_failure_preserves_every_copy_then_alternate_save_succeeds() {
-        let dir = scratch_dir("save-failure");
-        std::fs::create_dir_all(&dir).unwrap();
-        let failed_path = dir.join("chapter.md");
-        let alternate_path = dir.join("recovered.md");
-        let disk_text = "previous good manuscript";
-        std::fs::write(&failed_path, disk_text).unwrap();
-
-        let mut app = App::new(Some(failed_path.clone())).unwrap();
-        let end = app.buf.len_chars();
-        app.buf.insert(end, " with unsaved changes");
-        let expected_text = app.buf.rope.to_string();
-        let recovery_root = dir.join("recovery");
-        app.backup_depth = 2;
-        app.backup_root = Some(recovery_root.clone());
-        app.recovery_journals[0] = Journal::in_root(&recovery_root, Some(&failed_path), "unused");
-        app.maybe_autosave();
-        let recovery_path = app.recovery_journals[0].path().unwrap().to_path_buf();
-        assert_eq!(
-            std::fs::read_to_string(&recovery_path).unwrap(),
-            expected_text
-        );
-
-        // A directory at the atomic helper's sibling temp path deterministically
-        // simulates a write failure while a prior good manuscript exists.
-        let mut temporary = failed_path.clone().into_os_string();
-        temporary.push(".tmp~");
-        std::fs::create_dir(PathBuf::from(temporary)).unwrap();
-
-        // Exercise the actual command arm, not just Buffer::save directly.
-        app.execute(Cmd::Save);
-
-        assert_eq!(app.buf.rope.to_string(), expected_text);
-        assert_eq!(app.buf.path.as_deref(), Some(failed_path.as_path()));
-        assert!(app.buf.dirty);
-        assert_eq!(std::fs::read_to_string(&failed_path).unwrap(), disk_text);
-        assert_eq!(
-            std::fs::read_to_string(failed_path.with_extension("md.bak")).unwrap(),
-            disk_text
-        );
-        assert_eq!(
-            std::fs::read_to_string(&recovery_path).unwrap(),
-            expected_text
-        );
-        assert!(
-            app.status_msg
-                .as_deref()
-                .unwrap()
-                .starts_with("Save failed:")
-        );
-        match &app.mode {
-            Mode::Input {
-                label,
-                action: InputAction::SaveAs,
-                ..
-            } => {
-                assert!(label.contains("Save failed:"));
-                assert!(label.contains("Alternate save path"));
-            }
-            _ => panic!("save failure did not open the alternate-path prompt"),
-        }
-
-        if let Mode::Input { value, .. } = &mut app.mode {
-            *value = alternate_path.to_string_lossy().into_owned();
-        }
-        app.handle_input_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-
-        assert!(matches!(app.mode, Mode::Normal));
-        assert_eq!(app.buf.path.as_deref(), Some(alternate_path.as_path()));
-        assert!(!app.buf.dirty);
-        assert!(
-            !recovery_path.exists(),
-            "successful Save As left the old recovery journal"
-        );
-        assert_eq!(std::fs::read_to_string(&failed_path).unwrap(), disk_text);
-        assert_eq!(
-            std::fs::read_to_string(&alternate_path).unwrap(),
-            expected_text
-        );
-        assert_eq!(
-            app.status_msg.as_deref(),
-            Some(format!("Saved {}", app.buf.file_name()).as_str())
-        );
-        let save_as_backups = recovery_root
-            .join("backups")
-            .join(crate::paths::path_key(&alternate_path));
-        let backup = std::fs::read_dir(save_as_backups)
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        assert_eq!(std::fs::read_to_string(backup).unwrap(), expected_text);
-
-        // finish_save persists the pane session under the normal metadata root;
-        // remove this test's path-keyed artifact as well as its manuscript.
-        if let Some(sessions) = crate::paths::sessions() {
-            let session =
-                sessions.join(format!("{}.json", crate::paths::path_key(&alternate_path)));
-            let _ = std::fs::remove_file(session);
-        }
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn successful_save_paths_rotate_to_exact_backup_depth() {
-        let dir = scratch_dir("rolling-save-seams");
-        let source = dir.join("chapter.md");
-        let recovery_root = dir.join("recovery");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&source, "saved").unwrap();
-
-        let mut app = App::new(Some(source.clone())).unwrap();
-        app.backup_depth = 2;
-        app.backup_root = Some(recovery_root.clone());
-
-        app.recovery_journals[0] = Journal::in_root(&recovery_root, Some(&source), "unused");
-        let first_end = app.buf.len_chars();
-        app.buf.insert(first_end, " manually");
-        app.save();
-
-        app.recovery_journals[0] = Journal::in_root(&recovery_root, Some(&source), "unused");
-        let second_end = app.buf.len_chars();
-        app.buf.insert(second_end, " twice");
-        app.save();
-
-        app.recovery_journals[0] = Journal::in_root(&recovery_root, Some(&source), "unused");
-        app.autosave = Duration::from_nanos(1);
-        let autosave_end = app.buf.len_chars();
-        app.buf.insert(autosave_end, " and automatically");
-        app.maybe_autosave();
-
-        let backup_dir = recovery_root
-            .join("backups")
-            .join(crate::paths::path_key(&source));
-        let mut backups = std::fs::read_dir(backup_dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect::<Vec<_>>();
-        backups.sort();
-        assert_eq!(backups.len(), app.backup_depth);
-        assert_eq!(
-            std::fs::read_to_string(&backups[0]).unwrap(),
-            "saved manually twice"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&backups[1]).unwrap(),
-            "saved manually twice and automatically"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&source).unwrap(),
-            "saved manually twice and automatically"
-        );
-        assert_eq!(app.status_msg.as_deref(), Some("Autosaved"));
-        assert!(!app.buf.dirty);
-
-        if let Some(sessions) = crate::paths::sessions() {
-            let session = sessions.join(format!("{}.json", crate::paths::path_key(&source)));
-            let _ = std::fs::remove_file(session);
-        }
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn rolling_backup_failure_warns_without_turning_save_into_failure() {
-        let dir = scratch_dir("rolling-warning");
-        let source = dir.join("chapter.md");
-        let blocked_root = dir.join("not-a-directory");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&source, "old").unwrap();
-        std::fs::write(&blocked_root, "blocks directory creation").unwrap();
-
-        let mut app = App::new(Some(source.clone())).unwrap();
-        app.backup_depth = 1;
-        app.backup_root = Some(blocked_root);
-        let old_len = app.buf.len_chars();
-        app.buf.delete(0..old_len);
-        app.buf.insert(0, "new saved text");
-        app.save();
-
-        assert!(!app.buf.dirty);
-        assert_eq!(std::fs::read_to_string(&source).unwrap(), "new saved text");
-        let message = app.status_msg.as_deref().unwrap();
-        assert!(message.starts_with("Saved chapter.md;"));
-        assert!(message.contains("rolling backup failed:"));
-
-        if let Some(sessions) = crate::paths::sessions() {
-            let session = sessions.join(format!("{}.json", crate::paths::path_key(&source)));
-            let _ = std::fs::remove_file(session);
-        }
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn idle_tick_journals_unnamed_buffer_when_autosave_is_disabled() {
-        let dir = scratch_dir("recovery-unnamed");
-        let mut app = App::new(None).unwrap();
-        app.autosave = Duration::ZERO;
-        app.recovery_journals[0] = Journal::in_root(&dir, None, "untitled-idle");
-        app.buf.insert(0, "new unsaved manuscript");
-
-        app.maybe_autosave();
-
-        let journal_path = app.recovery_journals[0].path().unwrap();
-        assert!(app.buf.dirty);
-        assert_eq!(
-            std::fs::read_to_string(journal_path).unwrap(),
-            "new unsaved manuscript"
-        );
-        assert!(
-            journal_path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("untitled-idle-")
-        );
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn clean_exit_clears_journal_but_dirty_abandon_retains_it() {
-        let clean_dir = scratch_dir("recovery-clean-exit");
-        let mut clean_app = App::new(None).unwrap();
-        clean_app.autosave = Duration::ZERO;
-        clean_app.recovery_journals[0] = Journal::in_root(&clean_dir, None, "untitled-clean");
-        clean_app.buf.insert(0, "saved work");
-        clean_app.maybe_autosave();
-        let clean_path = clean_app.recovery_journals[0].path().unwrap().to_path_buf();
-        clean_app.buf.dirty = false;
-
-        clean_app.close_or_quit();
-
-        assert!(clean_app.quit);
-        assert!(!clean_path.exists());
-
-        let dirty_dir = scratch_dir("recovery-dirty-exit");
-        let mut dirty_app = App::new(None).unwrap();
-        dirty_app.autosave = Duration::ZERO;
-        dirty_app.recovery_journals[0] = Journal::in_root(&dirty_dir, None, "untitled-dirty");
-        dirty_app.buf.insert(0, "abandoned but recoverable");
-        dirty_app.maybe_autosave();
-        let dirty_path = dirty_app.recovery_journals[0].path().unwrap().to_path_buf();
-
-        // This is called only after the user confirms abandoning changes.
-        dirty_app.close_or_quit();
-
-        assert!(dirty_app.quit);
-        assert!(dirty_path.exists());
-        assert_eq!(
-            std::fs::read_to_string(&dirty_path).unwrap(),
-            "abandoned but recoverable"
-        );
-
-        let _ = std::fs::remove_dir_all(clean_dir);
-        let _ = std::fs::remove_dir_all(dirty_dir);
-    }
-
-    #[test]
-    fn startup_recovery_restores_as_one_undoable_dirty_edit() {
-        let dir = scratch_dir("recovery-restore");
-        let source = dir.join("chapter.md");
-        let recovery_root = dir.join("recovery");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&source, "saved manuscript").unwrap();
-        std::thread::sleep(Duration::from_millis(20));
-
-        let mut app = App::new(Some(source.clone())).unwrap();
-        app.recovery_journals[0] = Journal::in_root(&recovery_root, Some(&source), "unused");
-        app.recovery_journals[0]
-            .write_if_changed(&Rope::from_str("recovered manuscript"), Instant::now())
-            .unwrap();
-        let recovery_path = app.recovery_journals[0].path().unwrap().to_path_buf();
-        app.offer_recovery_for_active();
-
-        assert!(matches!(app.mode, Mode::ConfirmRecover));
-        assert!(
-            !app.splash,
-            "the splash must not consume the recovery answer"
-        );
-        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-        assert!(matches!(app.mode, Mode::ConfirmRecover));
-        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
-
-        assert!(matches!(app.mode, Mode::Normal));
-        assert_eq!(app.buf.rope.to_string(), "recovered manuscript");
-        assert!(app.buf.dirty);
-        assert_eq!(
-            std::fs::read_to_string(&source).unwrap(),
-            "saved manuscript"
-        );
-        assert!(
-            recovery_path.exists(),
-            "restore must retain the journal until save"
-        );
-
-        app.execute(Cmd::Undo);
-        assert_eq!(app.buf.rope.to_string(), "saved manuscript");
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn simulated_crash_restart_restores_then_save_clears_journal() {
-        let dir = scratch_dir("recovery-restart");
-        let source = dir.join("chapter.md");
-        let recovery_root = dir.join("recovery");
-        let disk_text = "saved manuscript";
-        let recovered_text = "saved manuscript plus unsaved work";
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&source, disk_text).unwrap();
-        std::thread::sleep(Duration::from_millis(20));
-
-        // First process: edit and reach the idle recovery tick, then disappear
-        // without save/clean-exit cleanup.
-        let mut crashed = App::new(Some(source.clone())).unwrap();
-        crashed.autosave = Duration::ZERO;
-        crashed.recovery_journals[0] = Journal::in_root(&recovery_root, Some(&source), "unused");
-        let end = crashed.buf.len_chars();
-        crashed.buf.insert(end, " plus unsaved work");
-        crashed.maybe_autosave();
-        let recovery_path = crashed.recovery_journals[0].path().unwrap().to_path_buf();
-        assert_eq!(
-            std::fs::read_to_string(&recovery_path).unwrap(),
-            recovered_text
-        );
-        assert_eq!(std::fs::read_to_string(&source).unwrap(), disk_text);
-        drop(crashed);
-
-        // Second process: reopen from disk, discover the surviving journal,
-        // accept it, and keep the on-disk manuscript unchanged until save.
-        let mut restarted = App::new(Some(source.clone())).unwrap();
-        restarted.backup_depth = 0;
-        restarted.recovery_journals[0] = Journal::in_root(&recovery_root, Some(&source), "unused");
-        restarted.offer_recovery_for_active();
-        assert!(matches!(restarted.mode, Mode::ConfirmRecover));
-        restarted.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
-
-        assert_eq!(restarted.buf.rope.to_string(), recovered_text);
-        assert!(restarted.buf.dirty);
-        assert_eq!(std::fs::read_to_string(&source).unwrap(), disk_text);
-        assert!(recovery_path.exists());
-
-        restarted.save();
-
-        assert!(!restarted.buf.dirty);
-        assert_eq!(std::fs::read_to_string(&source).unwrap(), recovered_text);
-        assert!(
-            !recovery_path.exists(),
-            "committing restored text must clear its crash journal"
-        );
-
-        if let Some(sessions) = crate::paths::sessions() {
-            let session = sessions.join(format!("{}.json", crate::paths::path_key(&source)));
-            let _ = std::fs::remove_file(session);
-        }
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn declining_startup_recovery_keeps_disk_text_and_clears_record() {
-        let dir = scratch_dir("recovery-decline");
-        let source = dir.join("chapter.md");
-        let recovery_root = dir.join("recovery");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&source, "saved manuscript").unwrap();
-        std::thread::sleep(Duration::from_millis(20));
-
-        let mut app = App::new(Some(source.clone())).unwrap();
-        app.recovery_journals[0] = Journal::in_root(&recovery_root, Some(&source), "unused");
-        app.recovery_journals[0]
-            .write_if_changed(&Rope::from_str("declined manuscript"), Instant::now())
-            .unwrap();
-        let recovery_path = app.recovery_journals[0].path().unwrap().to_path_buf();
-        app.offer_recovery_for_active();
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-
-        assert!(matches!(app.mode, Mode::Normal));
-        assert_eq!(app.buf.rope.to_string(), "saved manuscript");
-        assert!(!app.buf.dirty);
-        assert!(!recovery_path.exists());
-        assert_eq!(app.status_msg.as_deref(), Some("Recovery declined"));
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn app_project_initializes_as_none() {
-        // R1.8: backward compat — app starts with no project when opening
-        // a bare file. Task 1.2.
-        let app = App::new(None).expect("App creation should succeed");
-        assert!(app.project.is_none(), "Project should be None at startup");
-    }
-
-    #[test]
-    fn project_field_holds_loaded_project() {
-        // Task 1.2: the project field exists and can store a Project.
-        // We don't test the full load flow here (that's in project.rs tests),
-        // just that the type can hold one.
-        let mut app = App::new(None).expect("App creation should succeed");
-        assert!(app.project.is_none());
-
-        // Setting a project (would be done by open_project in practice).
-        // Just verify the field can hold it.
-        let _can_be_set: Option<Project> = app.project.take();
-        app.project = None; // Put it back
-        assert!(app.project.is_none());
-    }
-
-    /// Helper to create a test project with sample documents.
-    fn setup_test_project() -> (std::path::PathBuf, Project) {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("pstar-app-test-1.4-{}", id));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect(&format!("Failed to create test dir: {:?}", dir));
-
-        // Create test files.
-        let doc1 = dir.join("doc1.md");
-        let doc2 = dir.join("doc2.md");
-        let doc3 = dir.join("doc3.md");
-        std::fs::write(&doc1, "First document content").expect("Failed to write doc1");
-        std::fs::write(&doc2, "Second document content").expect("Failed to write doc2");
-        std::fs::write(&doc3, "Third document content").expect("Failed to write doc3");
-
-        // Create a project manifest.
-        let manifest_path = dir.join("test.pstarproj");
-        let project = Project {
-            manifest_path: manifest_path.clone(),
-            manifest: crate::project::ProjectManifest {
-                name: "Test Project".to_string(),
-                docs: vec![
-                    crate::project::DocEntry {
-                        path: doc1,
-                        title: "Doc 1".to_string(),
-                        include_in_compile: true,
-                    },
-                    crate::project::DocEntry {
-                        path: doc2,
-                        title: "Doc 2".to_string(),
-                        include_in_compile: true,
-                    },
-                    crate::project::DocEntry {
-                        path: doc3,
-                        title: "Doc 3".to_string(),
-                        include_in_compile: true,
-                    },
-                ],
-                separator: crate::project::Separator::PageBreak,
-            },
-        };
-        project.save().expect(&format!(
-            "Failed to save project manifest to {:?}",
-            manifest_path
-        ));
-
-        (dir, project)
-    }
-
-    #[test]
-    fn binder_move_up_at_top_is_noop() {
-        // Task 1.4: moving the first document up should be a no-op.
-        let (_dir, project) = setup_test_project();
-        let mut app = App::new(None).unwrap();
-        app.project = Some(project);
-
-        // Enter binder mode with first doc selected.
-        app.mode = Mode::Binder {
-            entries: vec![
-                BinderEntry {
-                    idx: 0,
-                    title: "Doc 1".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-                BinderEntry {
-                    idx: 1,
-                    title: "Doc 2".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-            ],
-            selected: 0,
-        };
-
-        // Try to move up from position 0.
-        app.binder_move_up();
-
-        // Should show "Already at top" message.
-        assert!(app.status_msg.as_ref().unwrap().contains("top"));
-
-        // Order should be unchanged.
-        let project = app.project.as_ref().unwrap();
-        assert_eq!(project.manifest.docs[0].title, "Doc 1");
-        assert_eq!(project.manifest.docs[1].title, "Doc 2");
-    }
-
-    #[test]
-    fn binder_move_down_at_bottom_is_noop() {
-        // Task 1.4: moving the last document down should be a no-op.
-        let (_dir, project) = setup_test_project();
-        let mut app = App::new(None).unwrap();
-        app.project = Some(project);
-
-        // Enter binder mode with last doc selected.
-        app.mode = Mode::Binder {
-            entries: vec![
-                BinderEntry {
-                    idx: 0,
-                    title: "Doc 1".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-                BinderEntry {
-                    idx: 1,
-                    title: "Doc 2".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-                BinderEntry {
-                    idx: 2,
-                    title: "Doc 3".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-            ],
-            selected: 2,
-        };
-
-        // Try to move down from last position.
-        app.binder_move_down();
-
-        // Should show "Already at bottom" message.
-        assert!(app.status_msg.as_ref().unwrap().contains("bottom"));
-
-        // Order should be unchanged.
-        let project = app.project.as_ref().unwrap();
-        assert_eq!(project.manifest.docs[2].title, "Doc 3");
-    }
-
-    #[test]
-    fn binder_move_up_reorders_and_saves() {
-        // Task 1.4: moving a document up should reorder and persist atomically (R1.4).
-        let (_dir, project) = setup_test_project();
-        let mut app = App::new(None).unwrap();
-        app.project = Some(project);
-
-        // Enter binder mode with second doc selected.
-        app.mode = Mode::Binder {
-            entries: vec![
-                BinderEntry {
-                    idx: 0,
-                    title: "Doc 1".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-                BinderEntry {
-                    idx: 1,
-                    title: "Doc 2".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-                BinderEntry {
-                    idx: 2,
-                    title: "Doc 3".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-            ],
-            selected: 1,
-        };
-
-        // Move second doc up (should become first).
-        app.binder_move_up();
-
-        // Check the new order in memory.
-        let project = app.project.as_ref().unwrap();
-        assert_eq!(project.manifest.docs[0].title, "Doc 2");
-        assert_eq!(project.manifest.docs[1].title, "Doc 1");
-        assert_eq!(project.manifest.docs[2].title, "Doc 3");
-
-        // Verify it was saved (reload and check).
-        let manifest_path = project.manifest_path.clone();
-        let reloaded = Project::load(&manifest_path).unwrap();
-        assert_eq!(reloaded.manifest.docs[0].title, "Doc 2");
-        assert_eq!(reloaded.manifest.docs[1].title, "Doc 1");
-    }
-
-    #[test]
-    fn binder_move_down_reorders_and_saves() {
-        // Task 1.4: moving a document down should reorder and persist atomically (R1.4).
-        let (_dir, project) = setup_test_project();
-        let mut app = App::new(None).unwrap();
-        app.project = Some(project);
-
-        // Enter binder mode with first doc selected.
-        app.mode = Mode::Binder {
-            entries: vec![
-                BinderEntry {
-                    idx: 0,
-                    title: "Doc 1".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-                BinderEntry {
-                    idx: 1,
-                    title: "Doc 2".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-                BinderEntry {
-                    idx: 2,
-                    title: "Doc 3".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-            ],
-            selected: 0,
-        };
-
-        // Move first doc down (should become second).
-        app.binder_move_down();
-
-        // Check the new order in memory.
-        let project = app.project.as_ref().unwrap();
-        assert_eq!(project.manifest.docs[0].title, "Doc 2");
-        assert_eq!(project.manifest.docs[1].title, "Doc 1");
-        assert_eq!(project.manifest.docs[2].title, "Doc 3");
-
-        // Verify it was saved.
-        let manifest_path = project.manifest_path.clone();
-        let reloaded = Project::load(&manifest_path).unwrap();
-        assert_eq!(reloaded.manifest.docs[0].title, "Doc 2");
-        assert_eq!(reloaded.manifest.docs[1].title, "Doc 1");
-    }
-
-    #[test]
-    fn project_add_doc_adds_and_saves() {
-        // Task 1.4: adding a document should append to manifest and save atomically (R1.5).
-        let (dir, project) = setup_test_project();
-        let mut app = App::new(None).unwrap();
-        app.project = Some(project);
-
-        // Create a new file to add.
-        let new_doc = dir.join("doc4.md");
-        std::fs::write(&new_doc, "New document").unwrap();
-
-        // Add the document.
-        app.project_add_doc(new_doc.to_str().unwrap());
-
-        // Verify it was added.
-        let project = app.project.as_ref().unwrap();
-        assert_eq!(project.manifest.docs.len(), 4);
-        assert_eq!(project.manifest.docs[3].title, "doc4");
-
-        // Verify it was saved.
-        let manifest_path = project.manifest_path.clone();
-        let reloaded = Project::load(&manifest_path).unwrap();
-        assert_eq!(reloaded.manifest.docs.len(), 4);
-        assert_eq!(reloaded.manifest.docs[3].title, "doc4");
-    }
-
-    #[test]
-    fn project_add_doc_missing_file_shows_error() {
-        // Task 1.4: adding a missing file should show an error (R1.5).
-        let (_dir, project) = setup_test_project();
-        let mut app = App::new(None).unwrap();
-        app.project = Some(project);
-
-        // Try to add a non-existent file.
-        app.project_add_doc("/nonexistent/file.md");
-
-        // Should show "File not found" error.
-        assert!(app.status_msg.as_ref().unwrap().contains("not found"));
-
-        // Project should be unchanged.
-        let project = app.project.as_ref().unwrap();
-        assert_eq!(project.manifest.docs.len(), 3);
-    }
-
-    #[test]
-    fn project_remove_doc_removes_and_saves() {
-        // Task 1.4: removing a document should delete from manifest but keep file (R1.5).
-        let (_dir, project) = setup_test_project();
-        let mut app = App::new(None).unwrap();
-        let doc2_path = project.manifest.docs[1].path.clone();
-        app.project = Some(project);
-
-        // Enter binder mode with second doc selected.
-        app.mode = Mode::Binder {
-            entries: vec![
-                BinderEntry {
-                    idx: 0,
-                    title: "Doc 1".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-                BinderEntry {
-                    idx: 1,
-                    title: "Doc 2".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-                BinderEntry {
-                    idx: 2,
-                    title: "Doc 3".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-            ],
-            selected: 1,
-        };
-
-        // Remove the selected document.
-        app.project_remove_doc();
-
-        // Verify it was removed from the manifest.
-        let project = app.project.as_ref().unwrap();
-        assert_eq!(project.manifest.docs.len(), 2);
-        assert_eq!(project.manifest.docs[0].title, "Doc 1");
-        assert_eq!(project.manifest.docs[1].title, "Doc 3");
-
-        // R1.5: verify the file still exists on disk.
-        assert!(doc2_path.exists(), "File should not be deleted from disk");
-
-        // Verify the change was saved.
-        let manifest_path = project.manifest_path.clone();
-        let reloaded = Project::load(&manifest_path).unwrap();
-        assert_eq!(reloaded.manifest.docs.len(), 2);
-    }
-
-    #[test]
-    fn project_remove_doc_shows_clear_message() {
-        // Task 1.4: removing should show clear message that file is kept (R1.5).
-        let (_dir, project) = setup_test_project();
-        let mut app = App::new(None).unwrap();
-        app.project = Some(project);
-
-        // Enter binder mode with first doc selected.
-        app.mode = Mode::Binder {
-            entries: vec![BinderEntry {
-                idx: 0,
-                title: "Doc 1".to_string(),
-                word_count: Some(3),
-                exists: true,
-            }],
-            selected: 0,
-        };
-
-        // Remove the document.
-        app.project_remove_doc();
-
-        // Verify the status message mentions "file kept on disk".
-        let msg = app.status_msg.as_ref().unwrap();
-        assert!(
-            msg.contains("kept on disk"),
-            "Message should clarify file is kept: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn project_remove_last_doc_adjusts_selection() {
-        // Task 1.4: removing the last document should adjust selection to avoid out-of-bounds.
-        let (_dir, project) = setup_test_project();
-        let mut app = App::new(None).unwrap();
-        app.project = Some(project);
-
-        // Enter binder mode with last doc selected.
-        app.mode = Mode::Binder {
-            entries: vec![
-                BinderEntry {
-                    idx: 0,
-                    title: "Doc 1".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-                BinderEntry {
-                    idx: 1,
-                    title: "Doc 2".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-                BinderEntry {
-                    idx: 2,
-                    title: "Doc 3".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-            ],
-            selected: 2,
-        };
-
-        // Remove the last document.
-        app.project_remove_doc();
-
-        // Verify selection was adjusted.
-        if let Mode::Binder { selected, entries } = &app.mode {
-            assert_eq!(
-                *selected, 1,
-                "Selection should be adjusted to last valid index"
-            );
-            assert_eq!(entries.len(), 2);
-        } else {
-            panic!("Should still be in binder mode");
-        }
-    }
-
-    #[test]
-    fn missing_file_resilience_in_binder() {
-        // Task 1.5: missing files should be flagged in binder but not prevent opening the project (R1.7).
-        let dir = std::env::temp_dir().join("pstar-missing-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        // Create a project with three docs, but only two files exist.
-        let doc1 = dir.join("exists1.md");
-        let doc2 = dir.join("missing.md"); // This file will NOT be created
-        let doc3 = dir.join("exists2.md");
-
-        std::fs::write(&doc1, "File 1 content").unwrap();
-        // doc2 intentionally not created
-        std::fs::write(&doc3, "File 3 content").unwrap();
-
-        let manifest_path = dir.join("test.pstarproj");
-        let project = Project {
-            manifest_path: manifest_path.clone(),
-            manifest: ProjectManifest {
-                name: "Test Project".to_string(),
-                docs: vec![
-                    DocEntry {
-                        path: doc1.clone(),
-                        title: "Existing Doc 1".to_string(),
-                        include_in_compile: true,
-                    },
-                    DocEntry {
-                        path: doc2.clone(),
-                        title: "Missing Doc".to_string(),
-                        include_in_compile: true,
-                    },
-                    DocEntry {
-                        path: doc3.clone(),
-                        title: "Existing Doc 3".to_string(),
-                        include_in_compile: true,
-                    },
-                ],
-                separator: crate::project::Separator::PageBreak,
-            },
-        };
-        project.save().unwrap();
-
-        // Load the project - should succeed despite missing file (R1.7).
-        let loaded_project = Project::load(&manifest_path).unwrap();
-        assert_eq!(loaded_project.manifest.docs.len(), 3);
-
-        // Verify doc_exists correctly identifies missing file.
-        assert!(loaded_project.doc_exists(0), "Doc 1 should exist");
-        assert!(!loaded_project.doc_exists(1), "Doc 2 should be missing");
-        assert!(loaded_project.doc_exists(2), "Doc 3 should exist");
-
-        // Verify word count returns None for missing file.
-        assert!(
-            loaded_project.doc_word_count(0).is_some(),
-            "Word count should work for existing files"
-        );
-        assert!(
-            loaded_project.doc_word_count(1).is_none(),
-            "Word count should return None for missing file"
-        );
-        assert!(
-            loaded_project.doc_word_count(2).is_some(),
-            "Word count should work for existing files"
-        );
-
-        // Create an App with this project and open the binder.
-        let mut app = App::new(None).unwrap();
-        app.project = Some(loaded_project);
-
-        // Trigger binder toggle to build entries.
-        app.execute(Cmd::BinderToggle);
-
-        // Verify binder entries reflect the existence status.
-        if let Mode::Binder { entries, .. } = &app.mode {
-            assert_eq!(entries.len(), 3);
-            assert!(entries[0].exists, "Entry 0 should exist");
-            assert!(!entries[1].exists, "Entry 1 should be marked as missing");
-            assert!(entries[2].exists, "Entry 2 should exist");
-
-            assert!(entries[0].word_count.is_some());
-            assert!(entries[1].word_count.is_none());
-            assert!(entries[2].word_count.is_some());
-        } else {
-            panic!("Should be in binder mode");
-        }
-
-        // Simulate trying to open the missing file from the binder.
-        app.mode = Mode::Binder {
-            entries: vec![
-                BinderEntry {
-                    idx: 0,
-                    title: "Existing Doc 1".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-                BinderEntry {
-                    idx: 1,
-                    title: "Missing Doc".to_string(),
-                    word_count: None,
-                    exists: false,
-                },
-                BinderEntry {
-                    idx: 2,
-                    title: "Existing Doc 3".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-            ],
-            selected: 1, // Select the missing file
-        };
-
-        // Try to open it by simulating Enter key.
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        app.handle_binder_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-
-        // Should show error message and stay in binder mode.
-        assert!(
-            app.status_msg.as_ref().unwrap().contains("missing"),
-            "Should show missing file error"
-        );
-        assert!(
-            matches!(app.mode, Mode::Binder { .. }),
-            "Should stay in binder mode"
-        );
-
-        // Verify we can open existing files.
-        app.mode = Mode::Binder {
-            entries: vec![
-                BinderEntry {
-                    idx: 0,
-                    title: "Existing Doc 1".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-                BinderEntry {
-                    idx: 1,
-                    title: "Missing Doc".to_string(),
-                    word_count: None,
-                    exists: false,
-                },
-                BinderEntry {
-                    idx: 2,
-                    title: "Existing Doc 3".to_string(),
-                    word_count: Some(3),
-                    exists: true,
-                },
-            ],
-            selected: 0, // Select existing file
-        };
-
-        app.handle_binder_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-
-        // Should successfully open and exit binder mode.
-        assert!(
-            matches!(app.mode, Mode::Normal),
-            "Should exit binder after opening existing file"
-        );
-        assert!(
-            app.status_msg.as_ref().unwrap().contains("Opened"),
-            "Should show success message"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
+#[path = "app_tests.rs"]
+mod tests;

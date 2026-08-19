@@ -71,3 +71,11 @@ Geoff Kuenning's Ispell, under a modified BSD license:
 
 Spellchecking itself is performed by the [`spellbook`](https://crates.io/crates/spellbook)
 crate, used under its own license terms as declared on crates.io.
+
+## Similar
+
+Revision diffing (the snapshot comparison view) uses the
+[`similar`](https://crates.io/crates/similar) crate, dual-licensed
+Apache-2.0 OR MIT, used under its license terms as declared on crates.io.
+See `docs/adr/ADR-014-similar-crate-for-revision-diff.md` for why this
+dependency was adopted.

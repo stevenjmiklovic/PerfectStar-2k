@@ -302,7 +302,9 @@ fn today_key() -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
-fn days_to_date(days_since_epoch: u64) -> (u32, u32, u32) {
+/// Days since the Unix epoch to a UTC `(year, month, day)`. Shared with the
+/// snapshot store, which stamps filenames from the same calendar math.
+pub fn days_to_date(days_since_epoch: u64) -> (u32, u32, u32) {
     // Algorithm from http://howardhinnant.github.io/date_algorithms.html
     let z = days_since_epoch + 719468;
     let era = z / 146097;

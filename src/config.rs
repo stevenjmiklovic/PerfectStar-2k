@@ -20,6 +20,13 @@ pub struct Config {
     /// Number of timestamped rolling backups retained per document; 0 disables
     /// new rolling backups without deleting copies already on disk.
     pub backup_depth: usize,
+    /// Number of *automatic* snapshots retained per document (R4.2). Manual
+    /// labelled snapshots are never pruned. 0 disables new automatic snapshots
+    /// without deleting versions already on disk.
+    pub snapshot_keep: usize,
+    /// Seconds of idle time between automatic snapshots of a dirty buffer;
+    /// 0 leaves automatic snapshots to happen on save only.
+    pub autosnapshot_secs: u64,
     /// Soft word wrap on startup.
     pub wrap: bool,
     /// Wrap margin in columns; 0 wraps at the window width.
@@ -42,6 +49,8 @@ impl Default for Config {
             menu_delay_ms: 700,
             autosave_secs: 60,
             backup_depth: 10,
+            snapshot_keep: 20,
+            autosnapshot_secs: 0,
             wrap: true,
             wrap_margin: 0,
             help_level: 1,
@@ -105,5 +114,22 @@ mod tests {
         let config: Config = toml::from_str("backup_depth = 0\n").unwrap();
 
         assert_eq!(config.backup_depth, 0);
+    }
+
+    #[test]
+    fn old_config_without_snapshot_keys_uses_defaults() {
+        let config: Config = toml::from_str("theme = 'wordstar'\n").unwrap();
+
+        assert_eq!(config.snapshot_keep, 20);
+        assert_eq!(config.autosnapshot_secs, 0);
+    }
+
+    #[test]
+    fn snapshot_keys_are_configurable() {
+        let config: Config =
+            toml::from_str("snapshot_keep = 0\nautosnapshot_secs = 300\n").unwrap();
+
+        assert_eq!(config.snapshot_keep, 0);
+        assert_eq!(config.autosnapshot_secs, 300);
     }
 }
