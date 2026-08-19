@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: StarBase planning backlog
+    url: https://github.com/stevenjmiklovic/PerfectStar-2k/blob/main/docs/starbase/ISSUE_BACKLOG.md
+    about: Review the phased StarBase roadmap and issue IDs before opening implementation work.

@@ -1,0 +1,64 @@
+name: StarBase task
+description: Define a bounded implementation or research task for StarBase
+title: "[StarBase] "
+labels:
+  - starbase
+body:
+  - type: input
+    id: parent
+    attributes:
+      label: Parent epic
+      placeholder: "#123"
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: State the concrete problem without prescribing an unnecessary implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: deliverables
+    attributes:
+      label: Deliverables
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Include behavior, tests, failure modes, and documentation where relevant.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and invariants
+      placeholder: "No TUI-thread I/O; no manuscript mutation; preserve Unicode character offsets."
+  - type: textarea
+    id: test_plan
+    attributes:
+      label: Test plan
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - architecture
+        - indexing
+        - storage
+        - MCP
+        - PerfectStar integration
+        - security
+        - testing
+        - documentation
+        - release
+    validations:
+      required: true
