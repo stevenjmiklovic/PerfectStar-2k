@@ -357,6 +357,20 @@ fn line_styles(
         }
     }
 
+    // Style advice marks its spans first, so a misspelling inside a flagged
+    // sentence still reads as a misspelling: a typo is a fact, style is advice.
+    if app.style_enabled {
+        for issue in app.style.issues_in_line(&text) {
+            for st in styles
+                .iter_mut()
+                .take(issue.end.min(n_chars))
+                .skip(issue.start)
+            {
+                *st = st.patch(app.theme.style_issue);
+            }
+        }
+    }
+
     if app.spell_enabled {
         for (s, e) in spellcheck::word_spans(&text) {
             let word: String = text.chars().skip(s).take(e - s).collect();
@@ -618,10 +632,14 @@ fn status_left(app: &App) -> String {
             // writer most wants there (R9.2's dimmed panel, without new chrome).
             None => match app.annotation_under_cursor() {
                 Some(text) => format!(" ✎ {text}"),
-                None => {
-                    let dirty = if app.buf.dirty { " •" } else { "" };
-                    format!(" {}{}", app.buf.file_name(), dirty)
-                }
+                // Then style advice, if the cursor is on a flagged span (R8.2).
+                None => match app.style_issue_at_cursor() {
+                    Some(label) => format!(" style: {label}"),
+                    None => {
+                        let dirty = if app.buf.dirty { " •" } else { "" };
+                        format!(" {}{}", app.buf.file_name(), dirty)
+                    }
+                },
             },
         },
     }
@@ -1158,6 +1176,33 @@ fn draw_stats_overlay(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from(" Recent days:"));
     for (date, words) in app.daily_history.recent(5) {
         lines.push(Line::from(format!("   {date}: {words:+}")));
+    }
+
+    // Readability and overused words, computed when the overlay opened (R8.4,
+    // R8.5). Absent when style checking is off — no figures beat stale figures.
+    if let Some(report) = &app.style_report {
+        let scope = if report.selection {
+            "selection"
+        } else {
+            "document"
+        };
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!(" Readability ({scope}):")));
+        lines.push(Line::from(format!(
+            "   grade {:.1} · {:.1} words/sentence",
+            report.readability.grade, report.readability.avg_sentence_words
+        )));
+        lines.push(Line::from(format!(
+            "   {} sentences · {:.1}% -ly adverbs",
+            report.readability.sentences, report.readability.adverb_percent
+        )));
+        if !report.overused.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(" Most repeated:"));
+            for (word, count) in &report.overused {
+                lines.push(Line::from(format!("   {word}: {count}")));
+            }
+        }
     }
 
     // Recent sprints (R3.2 files them here; R2.5 requires the history be
@@ -1730,6 +1775,54 @@ mod tests {
         );
         assert!(screen.contains("orphaned"), "{screen}");
         assert!(screen.contains("was about the cut scene"), "{screen}");
+    }
+
+    #[test]
+    fn style_issues_are_marked_distinctly_from_spelling() {
+        // R8.2: different marker, and spelling still wins where they overlap.
+        // "quietlly" is both a typo and an -ly adverb, so both rules fire on it.
+        let mut app = app_with("He walked quietlly away.\n");
+        app.style_enabled = true;
+        app.spell_enabled = true;
+
+        let style = app.theme.style_issue.fg.expect("a colour of its own");
+        let misspelled = app.theme.misspelled.fg.expect("a colour of its own");
+        assert_ne!(style, misspelled, "the two markers must be distinguishable");
+
+        let colors = row_colors(&mut app, 0);
+        // "quietlyy" is both an -ly adverb and a typo; the typo's marker wins.
+        assert_eq!(colors[10].0, misspelled);
+        // "walked" is clean prose either way.
+        assert_ne!(colors[3].0, style);
+        assert_ne!(colors[3].0, misspelled);
+
+        // With spelling off, the style marker shows through on the same word.
+        app.spell_enabled = false;
+        assert_eq!(row_colors(&mut app, 0)[10].0, style);
+
+        // With style off, nothing is marked.
+        app.style_enabled = false;
+        assert_ne!(row_colors(&mut app, 0)[10].0, style);
+    }
+
+    #[test]
+    fn the_stats_overlay_shows_readability_and_repeated_words() {
+        let text = "The knife was on the table. The knife was hers.\n";
+        let mut app = app_with(text);
+        // The overlay renders the snapshot the command computes; building it here
+        // keeps this test about the rendering.
+        app.style_report = Some(crate::app::StyleReport {
+            selection: false,
+            readability: crate::style::readability(text),
+            overused: crate::style::word_frequency(text, 5),
+        });
+        app.mode = Mode::Stats;
+
+        let screen = screen(&mut app).join("\n");
+        assert!(screen.contains("Readability (document)"), "{screen}");
+        assert!(screen.contains("words/sentence"), "{screen}");
+        assert!(screen.contains("Most repeated"), "{screen}");
+        assert!(screen.contains("knife: 2"), "{screen}");
     }
 
     #[test]

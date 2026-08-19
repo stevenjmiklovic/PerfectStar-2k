@@ -30,6 +30,7 @@ use crate::snapshot::{SnapshotEntry, SnapshotStore};
 use crate::spellcheck;
 use crate::sprint::{Focus, Sprint};
 use crate::stats::{DailyHistory, DocStats, GoalKind, SessionGoal};
+use crate::style::{Readability, StyleEngine};
 use crate::theme::Theme;
 use crate::ui;
 
@@ -188,6 +189,15 @@ pub struct BinderEntry {
     pub synopsis: String,
 }
 
+/// A snapshot of the on-demand style figures (R8.4, R8.5).
+#[derive(Debug, Clone)]
+pub struct StyleReport {
+    /// Whether these figures describe the marked block rather than the document.
+    pub selection: bool,
+    pub readability: Readability,
+    pub overused: Vec<(String, usize)>,
+}
+
 struct PendingRecovery {
     pane: usize,
     text: String,
@@ -222,6 +232,13 @@ pub struct App {
     pub wrap_margin: usize,
     pub spell: spellcheck::Spellchecker,
     pub spell_enabled: bool,
+    /// The style checker, configured from `config.toml` (R8, ADR-015).
+    pub style: StyleEngine,
+    pub style_enabled: bool,
+    /// Readability and overused-word figures, computed when the stats overlay
+    /// opens rather than per frame — on a book-length document this is real work
+    /// and must not land in the draw path (R8.6).
+    pub style_report: Option<StyleReport>,
     /// Keep the cursor's line pinned at a fixed row (view_rows / 2) and
     /// scroll the document under it, instead of only scrolling at the edges.
     pub typewriter: bool,
@@ -340,6 +357,9 @@ impl App {
             wrap_margin: config.wrap_margin,
             spell: spellcheck::Spellchecker::load(),
             spell_enabled: config.spellcheck,
+            style: StyleEngine::new(config.style_checks()),
+            style_enabled: config.style,
+            style_report: None,
             typewriter: config.typewriter,
             manuscript_font: config.manuscript_font(),
             autosave: Duration::from_secs(config.autosave_secs),
@@ -1290,7 +1310,9 @@ impl App {
             Cmd::StatsOverlay => {
                 if matches!(self.mode, Mode::Stats) {
                     self.mode = Mode::Normal;
+                    self.style_report = None;
                 } else {
+                    self.style_report = Some(self.style_report());
                     self.mode = Mode::Stats;
                 }
             }
@@ -1348,6 +1370,15 @@ impl App {
             Cmd::AnnotationList => self.open_annotation_list(),
             Cmd::NextAnnotation => self.jump_annotation(true),
             Cmd::PrevAnnotation => self.jump_annotation(false),
+            Cmd::ToggleStyle => {
+                self.style_enabled = !self.style_enabled;
+                self.status_msg = Some(String::from(if self.style_enabled {
+                    "Style checking on"
+                } else {
+                    "Style checking off"
+                }));
+            }
+            Cmd::NextStyleIssue => self.next_style_issue(),
         }
         if !matches!(cmd, Cmd::Undo) && !is_edit_cmd(cmd) {
             self.history.break_group();
@@ -3150,6 +3181,69 @@ impl App {
         let _ = last_path; // suppress unused warning
         self.mode = Mode::Normal;
         self.status_msg = Some(format!("{count} replacement(s) made"));
+    }
+
+    // --- style & readability (R8) ---------------------------------------------
+
+    /// ^QI: jump to the next style issue, as ^QN does for spelling (R8.3).
+    fn next_style_issue(&mut self) {
+        if !self.style_enabled {
+            self.status_msg = Some(String::from("Style checking is off (^OY to enable)"));
+            return;
+        }
+        let cursor = self.cursor;
+        let lines = self.buf.len_lines();
+        let mut from_line = self.buf.line_of(cursor);
+        // Walk from the cursor's line to the end, then wrap once, so the command
+        // always finds the *next* issue rather than re-reporting this one.
+        for step in 0..=lines {
+            let line_no = (from_line + step) % lines.max(1);
+            let text = self.buf.line_text(line_no).into_owned();
+            let start = self.buf.line_start(line_no);
+            for issue in self.style.issues_in_line(&text) {
+                let pos = start + issue.start;
+                if step == 0 && pos <= cursor {
+                    continue;
+                }
+                self.long_jump(pos.min(self.buf.len_chars()));
+                self.status_msg = Some(format!("Style: {}", issue.kind.label()));
+                return;
+            }
+            if step == lines {
+                break;
+            }
+            from_line = from_line.max(0);
+        }
+        self.status_msg = Some(String::from("No style issues found"));
+    }
+
+    /// The style issue under the cursor, for the status line (R8.2).
+    pub fn style_issue_at_cursor(&self) -> Option<&'static str> {
+        if !self.style_enabled {
+            return None;
+        }
+        let line_no = self.buf.line_of(self.cursor);
+        let offset = self.cursor - self.buf.line_start(line_no);
+        let text = self.buf.line_text(line_no);
+        self.style
+            .issues_in_line(&text)
+            .into_iter()
+            .find(|issue| offset >= issue.start && offset < issue.end)
+            .map(|issue| issue.kind.label())
+    }
+
+    /// Readability and overused words for the whole document, or for the marked
+    /// block when there is one (R8.4, R8.5).
+    fn style_report(&self) -> StyleReport {
+        let text = match self.blocks.range() {
+            Some((begin, end)) => self.buf.rope.slice(begin..end).to_string(),
+            None => self.buf.rope.to_string(),
+        };
+        StyleReport {
+            selection: self.blocks.range().is_some(),
+            readability: crate::style::readability(&text),
+            overused: crate::style::word_frequency(&text, 5),
+        }
     }
 
     // --- editorial annotations (R9) -------------------------------------------

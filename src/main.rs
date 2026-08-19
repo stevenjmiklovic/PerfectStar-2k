@@ -24,6 +24,7 @@ mod spellcheck;
 mod splash;
 mod sprint;
 mod stats;
+mod style;
 mod theme;
 mod ui;
 

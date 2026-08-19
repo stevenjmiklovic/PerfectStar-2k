@@ -376,25 +376,46 @@ Effort key: **S** ≤ half day · **M** ~1–2 days · **L** ~3–5 days.
 
 ## Phase 11 — P1: Style & readability (R8)
 
-- [ ] **11.1 [ADR-011] Style rule engine.** Record fixed-vs-extensible decision.
+- [x] **11.1 [ADR-011] Style rule engine.** Record fixed-vs-extensible decision.
   · ADR: D4 · Design §7.4 · **S**
+  **Recorded as ADR-015** (ADR-011 is the radio shell-out decision). Fixed
+  bundled rules, each toggleable, plus a numeric sentence-length threshold. A
+  regex rule language would put user-authored backtracking in the draw path with
+  no requirement behind it; the word lists are `const` data, so a
+  `style_filler_extra` key remains a later option without reopening the
+  decision.
 
-- [ ] **11.2 [gate] Style engine.** `style: Option<StyleEngine>` on `App`
+- [x] **11.2 [gate] Style engine.** `style: Option<StyleEngine>` on `App`
   (mirrors `spell`); rules: passive voice, `-ly` adverbs, bundled filter/crutch
   list, long-sentence threshold; debounced over changed ranges; offline.
   · Req: R8.1, R8.6 · Design §4.8 · Files: `style.rs` (new), `app.rs` · **L**
 
-- [ ] **11.3 Distinct markers + next-issue.** Render style issues distinctly
+- [x] **11.3 Distinct markers + next-issue.** Render style issues distinctly
   from spelling; `NextStyleIssue` (parallels `^QN`); `ToggleStyle` (`^OY`) with
   per-check config toggles. · Req: R8.2, R8.3, R8.7 · Files: `ui.rs`,
   `app.rs`, `keymap.rs`, `config.rs` · **M**
 
-- [ ] **11.4 Readability + word-frequency.** On-demand grade level, avg sentence
+- [x] **11.4 Readability + word-frequency.** On-demand grade level, avg sentence
   length, adverb ratio, overused-word report into the shared stats overlay.
   · Req: R8.4, R8.5 · Files: `style.rs`, `ui.rs` · **M**
 
-- [ ] **11.5 Tests.** Rule detection fixtures; latency on 300k fixture;
+- [x] **11.5 Tests.** Rule detection fixtures; latency on 300k fixture;
   frequency report. · **S**
+  **Result:** 22 tests — 12 engine (each rule, lookalike rejection, per-check
+  toggles, threshold, note exclusion, sentence splitting, readability, syllables,
+  frequency report, and a latency bound on an 11,000-word paragraph line), 5
+  app-level (default off + toggle, next-issue walk and wrap, clean document,
+  cursor reporting, on-demand report incl. selection scope), 2 render (distinct
+  from spelling, overlay figures), 3 config. 291 pass. Plus
+  `tests/harness/smoke_style.py` end-to-end.
+  **The latency test earned its place:** it caught two O(n²) scans — per-word and
+  per-sentence re-slicing from the start of the line — that would have made a
+  long soft-wrapped paragraph crawl in the draw path.
+  **Note on 11.2's "debounced":** not needed. Following `spellcheck.rs`, checks
+  resolve while the visible lines are drawn, so cost is bounded by the screen
+  rather than the manuscript, with no cached state to invalidate. The one
+  genuinely expensive computation — the readability and frequency report — is
+  computed when the `^OI` overlay opens, never per frame.
 
 ---
 

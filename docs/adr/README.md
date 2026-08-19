@@ -22,6 +22,7 @@ Each ADR documents the context, the decision, and its consequences so future con
 | [ADR-012](./ADR-012-project-manifest-format-and-location.md) | Project manifest format and location | Accepted | 2025-07-14 |
 | [ADR-013](./ADR-013-hand-generated-docx-and-epub.md) | Hand-generated DOCX and EPUB containers | Accepted | 2026-07-14 |
 | [ADR-014](./ADR-014-similar-crate-for-revision-diff.md) | Adopt the `similar` crate for revision diffing | Accepted | 2026-08-19 |
+| [ADR-015](./ADR-015-fixed-bundled-style-rules.md) | Fixed bundled style rules, individually toggleable | Accepted | 2026-08-19 |
 
 ## Format
 

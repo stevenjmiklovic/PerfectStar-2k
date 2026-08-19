@@ -2155,3 +2155,142 @@ fn comments_never_reach_an_export() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// --- Phase 11: style & readability (R8) --------------------------------------
+
+#[test]
+fn style_checking_is_off_by_default_and_toggles() {
+    // R8.1: optional. A fresh install doesn't open by arguing with the writer.
+    let mut app = App::new(None).unwrap();
+    app.splash = false;
+    assert!(!app.style_enabled);
+
+    app.execute(Cmd::ToggleStyle);
+    assert!(app.style_enabled);
+    assert!(
+        app.status_msg
+            .as_ref()
+            .unwrap()
+            .contains("Style checking on")
+    );
+
+    app.execute(Cmd::ToggleStyle);
+    assert!(!app.style_enabled);
+    assert!(app.status_msg.as_ref().unwrap().contains("off"));
+}
+
+#[test]
+fn next_style_issue_walks_the_document_like_next_misspelling() {
+    // R8.3.
+    let (dir, _source, mut app) = test_app(
+        "style-next",
+        "He took the knife.\nHe walked quietly away.\nThe door was closed.\n",
+    );
+
+    // Off by default, the command says so rather than doing nothing.
+    app.execute(Cmd::NextStyleIssue);
+    assert!(
+        app.status_msg.as_ref().unwrap().contains("^OY"),
+        "{:?}",
+        app.status_msg
+    );
+    assert_eq!(app.cursor, 0);
+
+    app.execute(Cmd::ToggleStyle);
+    app.set_cursor(0);
+    app.execute(Cmd::NextStyleIssue);
+    let first = app.cursor;
+    assert!(
+        first > 18,
+        "the first issue is on the second line, got {first}"
+    );
+    assert!(
+        app.status_msg.as_ref().unwrap().contains("adverb"),
+        "{:?}",
+        app.status_msg
+    );
+
+    app.execute(Cmd::NextStyleIssue);
+    assert!(app.cursor > first, "it advances rather than re-reporting");
+    assert!(
+        app.status_msg.as_ref().unwrap().contains("passive"),
+        "{:?}",
+        app.status_msg
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_clean_document_reports_no_style_issues() {
+    let (dir, _source, mut app) = test_app("style-clean", "He took the knife. She left.\n");
+    app.execute(Cmd::ToggleStyle);
+
+    app.execute(Cmd::NextStyleIssue);
+
+    assert_eq!(app.cursor, 0);
+    assert!(
+        app.status_msg.as_ref().unwrap().contains("No style issues"),
+        "{:?}",
+        app.status_msg
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_cursor_reports_the_style_issue_it_is_sitting_on() {
+    let (dir, _source, mut app) = test_app("style-cursor", "He walked quietly away.\n");
+    app.execute(Cmd::ToggleStyle);
+
+    app.set_cursor(12); // inside "quietly"
+    assert_eq!(app.style_issue_at_cursor(), Some("-ly adverb"));
+    app.set_cursor(0); // on "He"
+    assert_eq!(app.style_issue_at_cursor(), None);
+
+    // Nothing is reported while the checker is off.
+    app.execute(Cmd::ToggleStyle);
+    app.set_cursor(12);
+    assert_eq!(app.style_issue_at_cursor(), None);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn readability_and_overused_words_are_computed_when_the_overlay_opens() {
+    // R8.4/R8.5 on demand — and *only* on demand: computing this per frame on a
+    // book-length document would land in the draw path.
+    let (dir, _source, mut app) = test_app(
+        "style-report",
+        "The knife was on the table. The knife was Marcus's knife. He left.\n",
+    );
+    assert!(app.style_report.is_none());
+
+    app.execute(Cmd::StatsOverlay);
+
+    let report = app
+        .style_report
+        .clone()
+        .expect("the overlay computes figures");
+    assert!(!report.selection, "the whole document by default");
+    assert_eq!(report.readability.sentences, 3);
+    // A Flesch–Kincaid grade is legitimately near zero (or negative) for short
+    // simple sentences, so the figure to assert is that it computed at all.
+    assert!(report.readability.grade.is_finite());
+    assert_eq!(report.readability.words, 13);
+    assert_eq!(report.overused[0], (String::from("knife"), 3));
+
+    // Closing it drops the snapshot rather than leaving stale figures behind.
+    app.execute(Cmd::StatsOverlay);
+    assert!(app.style_report.is_none());
+
+    // With a block marked, the figures describe the selection (R8.4).
+    app.blocks.begin = Some(0);
+    app.blocks.end = Some(27);
+    app.execute(Cmd::StatsOverlay);
+    let report = app.style_report.clone().unwrap();
+    assert!(report.selection);
+    assert_eq!(report.readability.sentences, 1);
+
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -22,6 +22,7 @@ python3 -m venv .harness-venv
 | `bench_latency.py` | Opens the fixture, types a burst, measures per-keystroke round-trip latency against a budget. Exits non-zero on regression. |
 | `smoke_snapshots.py` | End-to-end walk of the R4 snapshot flow: `^KN` label → revise → `^KO` list → Enter diff → `^R` restore → `^U` undo. Exits non-zero on any failed screen check. |
 | `smoke_sprint_focus.py` | End-to-end walk of R3: `^OF` focus mode on/off (chrome actually leaves and returns) and a word-target sprint (`^OP`) driven to completion by typing. |
+| `smoke_style.py` | End-to-end walk of R8: `^OY` on/off, `^QI` next style issue with the issue named, and the `^OI` readability and overused-word report. |
 | `smoke_notes.py` | End-to-end walk of R5: `^PI` synopsis (including the pre-filled re-prompt), `^PT` notes in a split, and the binder's synopsis line and `^PM` note marking. Also covers `^P` prefix dispatch, which the unit tests bypass. |
 
 ## Running the smoke tests

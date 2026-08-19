@@ -55,6 +55,11 @@ pub struct Theme {
     /// (a misspelled word inside **bold** still looks bold) rather than
     /// replacing it.
     pub misspelled: Style,
+    /// Style issue (R8.2). Deliberately a different colour from `misspelled`,
+    /// and like it, applied with `Style::patch` — a misspelling inside a flagged
+    /// sentence still reads as a misspelling, because a typo is a fact and style
+    /// is advice.
+    pub style_issue: Style,
     /// Annotated span (R9.2). Like `misspelled`, it leaves `bg` unset and is
     /// applied with `Style::patch` so a comment on **bold** text still reads as
     /// bold — the prose flow is never altered, only marked.
@@ -84,6 +89,9 @@ impl Theme {
             highlight: Style::new().fg(dos::BLACK).bg(dos::YELLOW),
             misspelled: Style::new()
                 .fg(dos::LIGHT_RED)
+                .add_modifier(Modifier::UNDERLINED),
+            style_issue: Style::new()
+                .fg(dos::LIGHT_GREEN)
                 .add_modifier(Modifier::UNDERLINED),
             annotated: Style::new()
                 .fg(dos::LIGHT_MAGENTA)
@@ -118,6 +126,9 @@ impl Theme {
             misspelled: Style::new()
                 .fg(Color::Red)
                 .add_modifier(Modifier::UNDERLINED),
+            style_issue: Style::new()
+                .fg(Color::Green)
+                .add_modifier(Modifier::UNDERLINED),
             annotated: Style::new()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::UNDERLINED),
@@ -150,6 +161,9 @@ impl Theme {
             highlight: Style::new().fg(Color::Black).bg(Color::Yellow),
             misspelled: Style::new()
                 .fg(Color::Red)
+                .add_modifier(Modifier::UNDERLINED),
+            style_issue: Style::new()
+                .fg(Color::Green)
                 .add_modifier(Modifier::UNDERLINED),
             annotated: Style::new()
                 .fg(Color::Magenta)

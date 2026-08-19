@@ -151,6 +151,11 @@ pub enum Cmd {
     NextAnnotation,
     /// Go to the previous comment (R9.4).
     PrevAnnotation,
+    /// Style & readability (R8)
+    /// Turn style checking on or off (R8.1).
+    ToggleStyle,
+    /// Jump to the next style issue, as ^QN does for spelling (R8.3).
+    NextStyleIssue,
 }
 
 /// How a command is typed.
@@ -329,6 +334,13 @@ pub const BINDINGS: &[Binding] = &[
         cmd: Cmd::NextMisspelling,
         chord: Pref(Q, 'n'),
         name: "next misspelling",
+    },
+    // Style's next-issue sits beside spelling's, where "next thing to look at"
+    // lives (R8.3).
+    Binding {
+        cmd: Cmd::NextStyleIssue,
+        chord: Pref(Q, 'i'),
+        name: "next style issue",
     },
     Binding {
         cmd: Cmd::FindIncremental,
@@ -534,6 +546,11 @@ pub const BINDINGS: &[Binding] = &[
         cmd: Cmd::ToggleTypewriter,
         chord: Pref(O, 't'),
         name: "typewriter scrolling on/off",
+    },
+    Binding {
+        cmd: Cmd::ToggleStyle,
+        chord: Pref(O, 'y'),
+        name: "style checking on/off",
     },
     Binding {
         cmd: Cmd::OtherWindow,
