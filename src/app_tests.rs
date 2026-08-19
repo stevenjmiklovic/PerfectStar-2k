@@ -107,8 +107,7 @@ fn save_failure_preserves_every_copy_then_alternate_save_succeeds() {
     // finish_save persists the pane session under the normal metadata root;
     // remove this test's path-keyed artifact as well as its manuscript.
     if let Some(sessions) = crate::paths::sessions() {
-        let session =
-            sessions.join(format!("{}.json", crate::paths::path_key(&alternate_path)));
+        let session = sessions.join(format!("{}.json", crate::paths::path_key(&alternate_path)));
         let _ = std::fs::remove_file(session);
     }
     let _ = std::fs::remove_dir_all(dir);
@@ -1001,8 +1000,9 @@ fn typed(app: &mut App, text: &str) {
     }
 }
 
-/// An app on a real file with snapshots pointed at a temporary root.
-fn snapshot_app(tag: &str, text: &str) -> (PathBuf, PathBuf, App) {
+/// An app on a real file, with every write-heavy subsystem pointed at a
+/// temporary root instead of the writer's real metadata tree.
+fn test_app(tag: &str, text: &str) -> (PathBuf, PathBuf, App) {
     let dir = scratch_dir(tag);
     std::fs::create_dir_all(&dir).unwrap();
     let source = dir.join("chapter.md");
@@ -1024,7 +1024,7 @@ fn store_of(app: &App, source: &Path) -> SnapshotStore {
 
 #[test]
 fn snapshot_command_prompts_for_a_label_and_writes_the_text() {
-    let (dir, source, mut app) = snapshot_app("snap-manual", "Chapter One\n");
+    let (dir, source, mut app) = test_app("snap-manual", "Chapter One\n");
 
     app.execute(Cmd::Snapshot);
     assert!(
@@ -1057,7 +1057,7 @@ fn snapshot_command_prompts_for_a_label_and_writes_the_text() {
 
 #[test]
 fn an_empty_label_still_takes_the_snapshot() {
-    let (dir, source, mut app) = snapshot_app("snap-unlabelled", "text\n");
+    let (dir, source, mut app) = test_app("snap-unlabelled", "text\n");
 
     app.execute(Cmd::Snapshot);
     // Enter on an empty prompt cancels every other command; here it means
@@ -1095,7 +1095,7 @@ fn snapshotting_an_unsaved_buffer_is_refused_and_changes_nothing() {
 
 #[test]
 fn saving_takes_an_automatic_snapshot_and_retention_spares_manual_ones() {
-    let (dir, source, mut app) = snapshot_app("snap-on-save", "version one\n");
+    let (dir, source, mut app) = test_app("snap-on-save", "version one\n");
     app.snapshot_keep = 2;
 
     // A version the writer asked to keep, taken before any save.
@@ -1130,7 +1130,7 @@ fn saving_takes_an_automatic_snapshot_and_retention_spares_manual_ones() {
 
 #[test]
 fn automatic_snapshots_can_be_turned_off_without_losing_existing_ones() {
-    let (dir, source, mut app) = snapshot_app("snap-disabled", "one\n");
+    let (dir, source, mut app) = test_app("snap-disabled", "one\n");
     app.take_snapshot(Some("kept"));
     app.snapshot_keep = 0;
 
@@ -1147,7 +1147,7 @@ fn automatic_snapshots_can_be_turned_off_without_losing_existing_ones() {
 
 #[test]
 fn revisions_list_is_newest_first_and_diffs_against_the_current_draft() {
-    let (dir, _source, mut app) = snapshot_app("snap-revisions", "one\ntwo\n");
+    let (dir, _source, mut app) = test_app("snap-revisions", "one\ntwo\n");
     app.take_snapshot(Some("older"));
     std::thread::sleep(Duration::from_millis(2));
     app.take_snapshot(Some("newer"));
@@ -1184,7 +1184,7 @@ fn revisions_list_is_newest_first_and_diffs_against_the_current_draft() {
 
 #[test]
 fn diffing_an_unchanged_version_says_so_and_keeps_the_list_open() {
-    let (dir, _source, mut app) = snapshot_app("snap-identical", "unchanged\n");
+    let (dir, _source, mut app) = test_app("snap-identical", "unchanged\n");
     app.take_snapshot(None);
 
     app.execute(Cmd::RevisionsList);
@@ -1201,7 +1201,7 @@ fn diffing_an_unchanged_version_says_so_and_keeps_the_list_open() {
 
 #[test]
 fn marking_a_version_diffs_two_snapshots_oldest_first() {
-    let (dir, _source, mut app) = snapshot_app("snap-two-way", "first\n");
+    let (dir, _source, mut app) = test_app("snap-two-way", "first\n");
     app.take_snapshot(Some("older"));
     std::thread::sleep(Duration::from_millis(2));
     let end = app.buf.len_chars();
@@ -1228,7 +1228,7 @@ fn marking_a_version_diffs_two_snapshots_oldest_first() {
 
 #[test]
 fn restore_replaces_the_buffer_in_one_undo_step_and_is_reversible() {
-    let (dir, source, mut app) = snapshot_app("snap-restore", "the original chapter\n");
+    let (dir, source, mut app) = test_app("snap-restore", "the original chapter\n");
     app.take_snapshot(Some("original"));
 
     // Revise, in several separate edits, so a restore that merely undid the
@@ -1268,7 +1268,7 @@ fn restore_replaces_the_buffer_in_one_undo_step_and_is_reversible() {
 
 #[test]
 fn restore_from_the_diff_view_brings_back_the_older_version() {
-    let (dir, _source, mut app) = snapshot_app("snap-diff-restore", "snapshot text\n");
+    let (dir, _source, mut app) = test_app("snap-diff-restore", "snapshot text\n");
     app.take_snapshot(Some("mine"));
     let end = app.buf.len_chars();
     app.apply_edit(0, end, "draft text\n", EditKind::Other, 0);
@@ -1287,7 +1287,7 @@ fn restore_from_the_diff_view_brings_back_the_older_version() {
 
 #[test]
 fn a_failed_restore_leaves_the_buffer_alone() {
-    let (dir, source, mut app) = snapshot_app("snap-restore-fail", "working text\n");
+    let (dir, source, mut app) = test_app("snap-restore-fail", "working text\n");
     app.take_snapshot(Some("doomed"));
     // The snapshot file disappears between listing and restoring.
     let store = store_of(&app, &source);
@@ -1305,7 +1305,7 @@ fn a_failed_restore_leaves_the_buffer_alone() {
 
 #[test]
 fn the_diff_view_scrolls_and_closes_without_touching_the_document() {
-    let (dir, _source, mut app) = snapshot_app("snap-diff-scroll", "");
+    let (dir, _source, mut app) = test_app("snap-diff-scroll", "");
     let mut long = String::new();
     for i in 0..60 {
         long.push_str(&format!("line {i}\n"));
@@ -1349,6 +1349,242 @@ fn the_diff_view_scrolls_and_closes_without_touching_the_document() {
     app.handle_key(plain(KeyCode::Esc));
     assert!(matches!(app.mode, Mode::Normal));
     assert_eq!(app.buf.rope.to_string(), revised, "viewing is not editing");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// --- Phase 8: sprints and focus mode (R3) ----------------------------------
+
+#[test]
+fn the_sprint_prompt_starts_a_countdown() {
+    let (dir, _source, mut app) = test_app("sprint-start", "one two three\n");
+
+    app.execute(Cmd::SprintStart);
+    assert!(
+        matches!(
+            app.mode,
+            Mode::Input {
+                action: InputAction::SprintSpec,
+                ..
+            }
+        ),
+        "^OP should prompt for the sprint's terms"
+    );
+    typed(&mut app, "25/500");
+    app.handle_key(plain(KeyCode::Enter));
+
+    assert!(app.sprint.is_some());
+    let msg = app.status_msg.clone().unwrap();
+    assert!(msg.contains("Sprint started"), "{msg}");
+    assert!(msg.contains("0/500"), "{msg}");
+    assert!(msg.contains("⏱ 25:00"), "{msg}");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_nonsense_sprint_spec_reports_and_starts_nothing() {
+    let (dir, _source, mut app) = test_app("sprint-bad-spec", "text\n");
+
+    app.execute(Cmd::SprintStart);
+    typed(&mut app, "soon");
+    app.handle_key(plain(KeyCode::Enter));
+
+    assert!(app.sprint.is_none());
+    assert!(
+        app.status_msg.as_ref().unwrap().contains("not a number"),
+        "{:?}",
+        app.status_msg
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn an_expired_sprint_reports_words_and_time_and_is_filed_in_history() {
+    let (dir, _source, mut app) = test_app("sprint-expiry", "start\n");
+    let started = Instant::now();
+    app.execute(Cmd::SprintStart);
+    typed(&mut app, "25");
+    app.handle_key(plain(KeyCode::Enter));
+
+    // Write during the sprint, including a `..` note that must not count
+    // (R2.6 consistency: a sprint measures prose, like every other count).
+    app.set_cursor(app.buf.len_chars());
+    app.insert_text(
+        "four more prose words\n.. a note to self\n",
+        EditKind::Other,
+    );
+
+    // Not over yet.
+    app.tick_sprint_at(started + Duration::from_secs(60));
+    assert!(app.sprint.is_some());
+    assert!(app.daily_history.sprints.is_empty());
+
+    // The clock runs out.
+    app.tick_sprint_at(started + Duration::from_secs(25 * 60 + 1));
+
+    assert!(app.sprint.is_none(), "an expired sprint stops running");
+    let msg = app.status_msg.clone().unwrap();
+    assert!(msg.contains("Sprint done"), "{msg}");
+    assert!(msg.contains("4 words"), "prose words only: {msg}");
+    assert!(msg.contains("25:0"), "elapsed time reported: {msg}");
+    assert!(
+        msg.contains('✓'),
+        "a timed sprint that ran out met its terms"
+    );
+
+    assert_eq!(app.daily_history.sprints.len(), 1, "R3.2: filed in history");
+    let record = &app.daily_history.sprints[0];
+    assert_eq!(record.words, 4);
+    assert!(record.met_target);
+    assert!(record.seconds >= 25 * 60);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn meeting_the_word_target_finishes_the_sprint_before_the_clock() {
+    let (dir, _source, mut app) = test_app("sprint-target", "");
+    let started = Instant::now();
+    app.execute(Cmd::SprintStart);
+    typed(&mut app, "60/5");
+    app.handle_key(plain(KeyCode::Enter));
+
+    app.insert_text("one two three four", EditKind::Other);
+    app.tick_sprint_at(started + Duration::from_secs(30));
+    assert!(app.sprint.is_some(), "four of five words is not done");
+
+    app.insert_text(" five", EditKind::Other);
+    app.tick_sprint_at(started + Duration::from_secs(31));
+
+    assert!(app.sprint.is_none());
+    assert_eq!(app.daily_history.sprints[0].words, 5);
+    assert!(app.daily_history.sprints[0].met_target);
+    assert!(app.daily_history.sprints[0].seconds < 60 * 60);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn stopping_a_sprint_reports_it_without_filing_it() {
+    let (dir, _source, mut app) = test_app("sprint-stop", "");
+    app.execute(Cmd::SprintStart);
+    typed(&mut app, "25/500");
+    app.handle_key(plain(KeyCode::Enter));
+    app.insert_text("a few words here", EditKind::Other);
+
+    // The same chord stops it.
+    app.execute(Cmd::SprintStart);
+
+    assert!(app.sprint.is_none());
+    let msg = app.status_msg.clone().unwrap();
+    assert!(msg.contains("Sprint stopped"), "{msg}");
+    assert!(msg.contains("4 words"), "{msg}");
+    assert!(
+        app.daily_history.sprints.is_empty(),
+        "R3.2 files sprints that ended, not ones called off"
+    );
+    // ...and the prompt is available again for a fresh sprint.
+    app.execute(Cmd::SprintStart);
+    assert!(matches!(
+        app.mode,
+        Mode::Input {
+            action: InputAction::SprintSpec,
+            ..
+        }
+    ));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn focus_mode_forces_help_level_zero_and_restores_it() {
+    let (dir, _source, mut app) = test_app("focus-toggle", "text\n");
+    app.help_level = 2;
+
+    app.execute(Cmd::FocusMode);
+    assert!(app.focus.is_some());
+    assert_eq!(app.help_level, 0, "R3.3: chrome off means help level 0");
+    assert!(app.status_msg.as_ref().unwrap().contains("Focus mode"));
+
+    app.execute(Cmd::FocusMode);
+    assert!(app.focus.is_none());
+    assert_eq!(app.help_level, 2, "the writer's help level comes back");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn sprints_and_focus_never_touch_the_text_or_the_file() {
+    // R3.5: both are presentational. Run a whole sprint, toggle focus around it,
+    // and the document must be byte-identical and still clean.
+    let (dir, source, mut app) = test_app("presentational", "the manuscript\n");
+    let before = app.buf.rope.to_string();
+    let started = Instant::now();
+
+    app.execute(Cmd::FocusMode);
+    app.execute(Cmd::SprintStart);
+    typed(&mut app, "1/10");
+    app.handle_key(plain(KeyCode::Enter));
+    app.tick_sprint_at(started + Duration::from_secs(61));
+    app.execute(Cmd::FocusMode);
+
+    assert!(app.sprint.is_none());
+    assert_eq!(app.buf.rope.to_string(), before);
+    assert!(!app.buf.dirty, "no edit means no dirty buffer");
+    assert_eq!(std::fs::read_to_string(&source).unwrap(), before);
+    assert_eq!(app.cursor, 0, "neither command moves the cursor");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_sprint_survives_focus_mode_and_keeps_counting() {
+    let (dir, _source, mut app) = test_app("sprint-in-focus", "");
+    let started = Instant::now();
+    app.execute(Cmd::SprintStart);
+    typed(&mut app, "25/500");
+    app.handle_key(plain(KeyCode::Enter));
+    app.execute(Cmd::FocusMode);
+
+    app.insert_text("words written while focused", EditKind::Other);
+    let sprint = app.sprint.clone().unwrap();
+    assert_eq!(sprint.words_written(app.doc_stats.words), 4);
+    assert!(
+        sprint
+            .chip(started + Duration::from_secs(60), app.doc_stats.words)
+            .contains("4/500")
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_sprint_report_survives_the_keystroke_that_ends_the_sprint() {
+    // A sprint usually completes mid-word, so the next letter typed would clear
+    // an ordinary status message and the writer would never see the report
+    // (R3.2). The banner outlives it.
+    let (dir, _source, mut app) = test_app("sprint-banner", "");
+    let started = Instant::now();
+    app.execute(Cmd::SprintStart);
+    typed(&mut app, "60/2");
+    app.handle_key(plain(KeyCode::Enter));
+
+    app.insert_text("one two", EditKind::Other);
+    app.tick_sprint_at(started + Duration::from_secs(5));
+    assert!(app.status_msg.as_ref().unwrap().contains("Sprint done"));
+
+    // Keep typing: the transient status message goes, the report stays.
+    app.handle_key(plain(KeyCode::Char('!')));
+    assert!(app.status_msg.is_none());
+    let banner = app.sprint_banner().expect("report should outlive a keystroke");
+    assert!(banner.contains("Sprint done"), "{banner}");
+    assert!(banner.contains("2 words"), "{banner}");
+
+    // Starting the next sprint clears the last one's report.
+    app.execute(Cmd::SprintStart);
+    assert!(app.sprint_banner().is_none());
 
     let _ = std::fs::remove_dir_all(dir);
 }

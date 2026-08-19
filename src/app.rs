@@ -27,11 +27,42 @@ use crate::rtf;
 use crate::search::{ReplacePhase, ReplaceState, SearchState};
 use crate::snapshot::{SnapshotEntry, SnapshotStore};
 use crate::spellcheck;
+use crate::sprint::{Focus, Sprint};
 use crate::stats::{DailyHistory, DocStats, GoalKind, SessionGoal};
 use crate::theme::Theme;
 use crate::ui;
 
 const JUMP_STACK_MAX: usize = 32;
+
+/// How long a finished sprint's report stays on screen. Long enough to read
+/// after a sentence, short enough that it never becomes chrome.
+const SPRINT_BANNER: Duration = Duration::from_secs(10);
+
+/// Result of a shared list-navigation key check. Panels call `list_nav_key`
+/// before their own match arms so Up/Down/^E/^X/Esc are handled uniformly.
+enum ListNav {
+    /// Move selection up by 1 (saturating).
+    Up,
+    /// Move selection down by 1 (clamped to last).
+    Down,
+    /// Close the panel (Esc).
+    Dismiss,
+    /// Not a navigation key — let the panel handle it.
+    Other,
+}
+
+/// Map a key event to a list-navigation action shared by all overlay panels.
+fn list_nav_key(key: &KeyEvent) -> ListNav {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => ListNav::Dismiss,
+        KeyCode::Up => ListNav::Up,
+        KeyCode::Down => ListNav::Down,
+        KeyCode::Char('e') if ctrl => ListNav::Up,
+        KeyCode::Char('x') if ctrl => ListNav::Down,
+        _ => ListNav::Other,
+    }
+}
 
 /// What a text-input prompt is collecting (^KW, ^KR).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +94,8 @@ pub enum InputAction {
     ProjectSearch,
     /// Project-wide replace: "find|replace" format (^PW).
     ProjectReplace,
+    /// Sprint terms: `minutes[/words]` (^OP, R3.1).
+    SprintSpec,
     /// Optional label for a snapshot taken with ^KN (R4.1). Unlike every other
     /// prompt, an empty answer is meaningful: take the snapshot unlabelled.
     SnapshotLabel,
@@ -223,6 +256,19 @@ pub struct App {
     pub daily_history: DailyHistory,
     /// Word count at start of this editing session (for daily delta).
     session_start_words: usize,
+    /// The running writing sprint, if any (R3.1).
+    pub sprint: Option<Sprint>,
+    /// The last sprint's result and when it landed (R3.2).
+    ///
+    /// Kept separately from `status_msg` because that is cleared by the next
+    /// keystroke — and a sprint typically ends *mid-word*, so the report would
+    /// be erased by the letter the writer was already typing. This survives
+    /// typing for [`SPRINT_BANNER`] instead, without blocking anything.
+    sprint_banner: Option<(String, Instant)>,
+    /// Focus mode state, holding the help level to restore (R3.3).
+    pub focus: Option<Focus>,
+    /// Whether focus mode dims everything outside the current paragraph (R3.4).
+    pub focus_dim: bool,
 }
 
 /// `App` dereferences to the active pane, so the whole editing engine —
@@ -249,7 +295,14 @@ impl App {
         let recovery_journal = Journal::new(pane.buf.path.as_deref());
         let config = Config::load();
         let initial_stats = DocStats::from_rope(&pane.buf.rope);
-        let daily_history = DailyHistory::load(pane.buf.path.as_deref());
+        // As with `snapshot_root`: a test run must not write into the writer's
+        // real stats directory. An unrooted history keeps working in memory and
+        // saves nowhere, and the tests that check persistence build their own.
+        let daily_history = if cfg!(test) {
+            DailyHistory::default()
+        } else {
+            DailyHistory::load(pane.buf.path.as_deref())
+        };
         let start_words = initial_stats.words;
         let mut app = App {
             panes: vec![pane],
@@ -299,6 +352,10 @@ impl App {
             goal_notified: false,
             daily_history,
             session_start_words: start_words,
+            sprint: None,
+            sprint_banner: None,
+            focus: None,
+            focus_dim: config.focus_dim,
         };
         app.offer_recovery_for_active();
         Ok(app)
@@ -324,6 +381,9 @@ impl App {
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.quit {
+            // Checked every turn, not only on idle ticks, so a sprint ends when
+            // it ends even if the writer is typing straight through it.
+            self.tick_sprint();
             terminal.draw(|f| ui::draw(f, self))?;
             if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
@@ -456,6 +516,68 @@ impl App {
                         }
                     ));
                 }
+            }
+        }
+    }
+
+    /// End a sprint whose clock ran out or whose word target was met: report it
+    /// and file it in the daily history (R3.2).
+    ///
+    /// Nothing here touches the buffer (R3.5) — a sprint is a clock and a
+    /// counter, and its only side effect on disk is one line of history.
+    fn tick_sprint(&mut self) {
+        self.tick_sprint_at(Instant::now());
+    }
+
+    /// The clock-injected form, so tests can run a sprint out without waiting.
+    fn tick_sprint_at(&mut self, now: Instant) {
+        let Some(sprint) = self.sprint.clone() else {
+            return;
+        };
+        let words = self.doc_stats.words;
+        if !sprint.is_finished(now, words) {
+            return;
+        }
+
+        let report = sprint.report(now, words);
+        self.sprint = None;
+        self.daily_history
+            .record_sprint(report.words, report.elapsed.as_secs(), report.met_target);
+        let mark = if report.met_target { " ✓" } else { "" };
+        let message = match self.daily_history.save() {
+            Ok(()) => format!("Sprint done — {}{mark}", report.summary()),
+            Err(error) => format!(
+                "Sprint done — {}{mark} (history not saved: {error})",
+                report.summary()
+            ),
+        };
+        self.status_msg = Some(message.clone());
+        self.sprint_banner = Some((message, now));
+    }
+
+    /// The finished-sprint report, while it is still fresh (R3.2).
+    pub fn sprint_banner(&self) -> Option<&str> {
+        self.sprint_banner
+            .as_ref()
+            .filter(|(_, shown)| shown.elapsed() < SPRINT_BANNER)
+            .map(|(message, _)| message.as_str())
+    }
+
+    /// ^OF: strip the screen to the prose, or put the chrome back (R3.3).
+    ///
+    /// Purely presentational (R3.5). The one piece of editor state it changes is
+    /// the help level, remembered on the way in so a writer who runs with menus
+    /// gets them back on the way out.
+    fn toggle_focus(&mut self) {
+        match self.focus.take() {
+            Some(focus) => {
+                self.help_level = focus.prior_help_level();
+                self.status_msg = Some(String::from("Focus mode off"));
+            }
+            None => {
+                self.focus = Some(Focus::enter(self.help_level));
+                self.help_level = 0;
+                self.status_msg = Some(String::from("Focus mode — ^OF to exit"));
             }
         }
     }
@@ -615,14 +737,14 @@ impl App {
             return;
         };
         let entries = keymap::filtered_entries(query);
+        let last = entries.len().saturating_sub(1);
+        match list_nav_key(&key) {
+            ListNav::Dismiss => { self.mode = Mode::Normal; return; }
+            ListNav::Up => { *selected = selected.saturating_sub(1); return; }
+            ListNav::Down => { *selected = (*selected + 1).min(last); return; }
+            ListNav::Other => {}
+        }
         match key.code {
-            KeyCode::Esc => self.mode = Mode::Normal,
-            KeyCode::Up => *selected = selected.saturating_sub(1),
-            KeyCode::Down => *selected = (*selected + 1).min(entries.len().saturating_sub(1)),
-            KeyCode::Char('e') if ctrl => *selected = selected.saturating_sub(1),
-            KeyCode::Char('x') if ctrl => {
-                *selected = (*selected + 1).min(entries.len().saturating_sub(1))
-            }
             KeyCode::Backspace => {
                 query.pop();
                 *selected = 0;
@@ -661,14 +783,14 @@ impl App {
             })
             .map(|(i, _)| i)
             .collect();
+        let last = matches.len().saturating_sub(1);
+        match list_nav_key(&key) {
+            ListNav::Dismiss => { self.mode = Mode::Normal; return; }
+            ListNav::Up => { *selected = selected.saturating_sub(1); return; }
+            ListNav::Down => { *selected = (*selected + 1).min(last); return; }
+            ListNav::Other => {}
+        }
         match key.code {
-            KeyCode::Esc => self.mode = Mode::Normal,
-            KeyCode::Up => *selected = selected.saturating_sub(1),
-            KeyCode::Down => *selected = (*selected + 1).min(matches.len().saturating_sub(1)),
-            KeyCode::Char('e') if ctrl => *selected = selected.saturating_sub(1),
-            KeyCode::Char('x') if ctrl => {
-                *selected = (*selected + 1).min(matches.len().saturating_sub(1))
-            }
             KeyCode::Backspace => {
                 query.pop();
                 *selected = 0;
@@ -694,15 +816,14 @@ impl App {
         let Mode::Binder { entries, selected } = &mut self.mode else {
             return;
         };
-        let num_entries = entries.len();
+        let last = entries.len().saturating_sub(1);
+        match list_nav_key(&key) {
+            ListNav::Dismiss => { self.mode = Mode::Normal; return; }
+            ListNav::Up => { *selected = selected.saturating_sub(1); return; }
+            ListNav::Down => { *selected = (*selected + 1).min(last); return; }
+            ListNav::Other => {}
+        }
         match key.code {
-            KeyCode::Esc => self.mode = Mode::Normal,
-            KeyCode::Up => *selected = selected.saturating_sub(1),
-            KeyCode::Down => *selected = (*selected + 1).min(num_entries.saturating_sub(1)),
-            KeyCode::Char('e') if ctrl => *selected = selected.saturating_sub(1),
-            KeyCode::Char('x') if ctrl => {
-                *selected = (*selected + 1).min(num_entries.saturating_sub(1))
-            }
             KeyCode::Enter => {
                 // Open the selected document in the active pane.
                 // R1.3: session restore is automatic via Pane::open.
@@ -715,15 +836,11 @@ impl App {
                     if let Some(ref project) = self.project {
                         if let Some(doc) = project.manifest.docs.get(entry.idx) {
                             let path = doc.path.clone();
+                            let title = doc.title.clone();
                             self.mode = Mode::Normal;
-                            // Open the document in the active pane.
-                            // This replaces the current pane's buffer and restores its session.
-                            match crate::pane::Pane::open(Some(path)) {
-                                Ok(pane) => {
-                                    let journal = Journal::new(pane.buf.path.as_deref());
-                                    self.panes[self.active] = pane;
-                                    self.recovery_journals[self.active] = journal;
-                                    self.status_msg = Some(format!("Opened: {}", doc.title));
+                            match self.switch_active_pane(path) {
+                                Ok(()) => {
+                                    self.status_msg = Some(format!("Opened: {title}"));
                                 }
                                 Err(e) => {
                                     self.status_msg = Some(format!("Failed to open: {e}"));
@@ -966,37 +1083,22 @@ impl App {
                 };
             }
             Cmd::ExportProjectDocx => {
-                if self.project.is_some() {
-                    self.mode = Mode::Input {
-                        label: String::from("Export project DOCX to file"),
-                        value: String::new(),
-                        action: InputAction::ExportProjectDocx,
-                    };
-                } else {
-                    self.status_msg = Some(String::from("No project loaded (^PP to open)"));
-                }
+                self.project_prompt(
+                    "Export project DOCX to file",
+                    InputAction::ExportProjectDocx,
+                );
             }
             Cmd::ExportProjectEpub => {
-                if self.project.is_some() {
-                    self.mode = Mode::Input {
-                        label: String::from("Export project EPUB to file"),
-                        value: String::new(),
-                        action: InputAction::ExportProjectEpub,
-                    };
-                } else {
-                    self.status_msg = Some(String::from("No project loaded (^PP to open)"));
-                }
+                self.project_prompt(
+                    "Export project EPUB to file",
+                    InputAction::ExportProjectEpub,
+                );
             }
             Cmd::ExportProjectHtml => {
-                if self.project.is_some() {
-                    self.mode = Mode::Input {
-                        label: String::from("Export project HTML to file"),
-                        value: String::new(),
-                        action: InputAction::ExportProjectHtml,
-                    };
-                } else {
-                    self.status_msg = Some(String::from("No project loaded (^PP to open)"));
-                }
+                self.project_prompt(
+                    "Export project HTML to file",
+                    InputAction::ExportProjectHtml,
+                );
             }
             Cmd::ToggleWrap => {
                 self.wrap = !self.wrap;
@@ -1117,15 +1219,10 @@ impl App {
             Cmd::BinderMoveUp => self.binder_move_up(),
             Cmd::BinderMoveDown => self.binder_move_down(),
             Cmd::ProjectAddDoc => {
-                if self.project.is_some() {
-                    self.mode = Mode::Input {
-                        label: String::from("Add document to project (file path)"),
-                        value: String::new(),
-                        action: InputAction::ProjectAddDoc,
-                    };
-                } else {
-                    self.status_msg = Some(String::from("No project loaded (^PP to open)"));
-                }
+                self.project_prompt(
+                    "Add document to project (file path)",
+                    InputAction::ProjectAddDoc,
+                );
             }
             Cmd::ProjectRemoveDoc => self.project_remove_doc(),
             Cmd::WordCount => {
@@ -1151,26 +1248,13 @@ impl App {
                 }
             }
             Cmd::ProjectFind => {
-                if self.project.is_some() {
-                    self.mode = Mode::Input {
-                        label: String::from("Project search"),
-                        value: String::new(),
-                        action: InputAction::ProjectSearch,
-                    };
-                } else {
-                    self.status_msg = Some(String::from("No project loaded (^PP to open)"));
-                }
+                self.project_prompt("Project search", InputAction::ProjectSearch);
             }
             Cmd::ProjectReplace => {
-                if self.project.is_some() {
-                    self.mode = Mode::Input {
-                        label: String::from("Project replace (find|replace)"),
-                        value: String::new(),
-                        action: InputAction::ProjectReplace,
-                    };
-                } else {
-                    self.status_msg = Some(String::from("No project loaded (^PP to open)"));
-                }
+                self.project_prompt(
+                    "Project replace (find|replace)",
+                    InputAction::ProjectReplace,
+                );
             }
             Cmd::Snapshot => {
                 if self.buf.path.is_some() {
@@ -1188,9 +1272,62 @@ impl App {
                 }
             }
             Cmd::RevisionsList => self.open_revisions(),
+            Cmd::SprintStart => match self.sprint.take() {
+                // The same chord stops a running sprint: a countdown you can't
+                // call off isn't a writing tool. A stopped sprint reports what
+                // it managed but isn't filed as a finished one — R3.2 records
+                // sprints that *ended*, and a history full of abandoned
+                // three-minute stubs would tell the writer nothing.
+                Some(sprint) => {
+                    let report = sprint.report(Instant::now(), self.doc_stats.words);
+                    self.status_msg = Some(format!("Sprint stopped — {}", report.summary()));
+                }
+                None => {
+                    // A new sprint replaces the last one's report.
+                    self.sprint_banner = None;
+                    self.mode = Mode::Input {
+                        label: String::from("Sprint: minutes[/words], e.g. 25 or 25/500"),
+                        value: String::new(),
+                        action: InputAction::SprintSpec,
+                    };
+                }
+            },
+            Cmd::FocusMode => self.toggle_focus(),
         }
         if !matches!(cmd, Cmd::Undo) && !is_edit_cmd(cmd) {
             self.history.break_group();
+        }
+    }
+
+    /// Open a project-gated input prompt: if a project is loaded, enter
+    /// `Mode::Input` with the given label and action; otherwise show the
+    /// standard "no project" hint.
+    fn project_prompt(&mut self, label: &str, action: InputAction) {
+        if self.project.is_some() {
+            self.mode = Mode::Input {
+                label: String::from(label),
+                value: String::new(),
+                action,
+            };
+        } else {
+            self.status_msg = Some(String::from("No project loaded (^PP to open)"));
+        }
+    }
+
+    /// Replace the active pane with a freshly opened file, setting up its
+    /// recovery journal and recomputing document statistics. Returns `Err`
+    /// with a human-readable message on failure.
+    fn switch_active_pane(&mut self, path: PathBuf) -> Result<(), String> {
+        match Pane::open(Some(path)) {
+            Ok(pane) => {
+                let journal = Journal::new(pane.buf.path.as_deref());
+                self.panes[self.active] = pane;
+                self.recovery_journals[self.active] = journal;
+                self.doc_stats =
+                    crate::stats::DocStats::from_rope(&self.panes[self.active].buf.rope);
+                Ok(())
+            }
+            Err(e) => Err(format!("{e}")),
         }
     }
 
@@ -1853,6 +1990,19 @@ impl App {
                     InputAction::SnapshotLabel => {
                         let label = (!path.is_empty()).then_some(path.as_str());
                         self.take_snapshot(label);
+                    }
+                    InputAction::SprintSpec => {
+                        let now = Instant::now();
+                        match Sprint::parse(&path, self.doc_stats.words, now) {
+                            Ok(sprint) => {
+                                self.status_msg = Some(format!(
+                                    "Sprint started — {}",
+                                    sprint.chip(now, self.doc_stats.words)
+                                ));
+                                self.sprint = Some(sprint);
+                            }
+                            Err(message) => self.status_msg = Some(message),
+                        }
                     }
                     InputAction::ProjectSearch => self.run_project_search(&path, None),
                     InputAction::ProjectReplace => {
@@ -2727,18 +2877,24 @@ impl App {
             };
             (results.len(), *selected, replace_with.clone())
         };
-        match key.code {
-            KeyCode::Esc => self.mode = Mode::Normal,
-            KeyCode::Up | KeyCode::Char('e') if ctrl || matches!(key.code, KeyCode::Up) => {
+        let last = num_results.saturating_sub(1);
+        match list_nav_key(&key) {
+            ListNav::Dismiss => { self.mode = Mode::Normal; return; }
+            ListNav::Up => {
                 if let Mode::ProjectSearch { selected, .. } = &mut self.mode {
                     *selected = selected.saturating_sub(1);
                 }
+                return;
             }
-            KeyCode::Down | KeyCode::Char('x') if ctrl || matches!(key.code, KeyCode::Down) => {
+            ListNav::Down => {
                 if let Mode::ProjectSearch { selected, .. } = &mut self.mode {
-                    *selected = (*selected + 1).min(num_results.saturating_sub(1));
+                    *selected = (*selected + 1).min(last);
                 }
+                return;
             }
+            ListNav::Other => {}
+        }
+        match key.code {
             KeyCode::Enter => {
                 // Jump to the selected result (R6.2).
                 self.project_search_jump(selected);
@@ -2772,14 +2928,8 @@ impl App {
         }
 
         // Open the doc (R6.2).
-        match Pane::open(Some(path)) {
-            Ok(pane) => {
-                let journal = Journal::new(pane.buf.path.as_deref());
-                self.panes[self.active] = pane;
-                self.recovery_journals[self.active] = journal;
-                // Recompute stats for the new document.
-                self.doc_stats =
-                    crate::stats::DocStats::from_rope(&self.panes[self.active].buf.rope);
+        match self.switch_active_pane(path) {
+            Ok(()) => {
                 self.long_jump(char_pos);
             }
             Err(e) => {
@@ -2813,18 +2963,9 @@ impl App {
 
         // Ensure the file is open in the active pane.
         if self.panes[self.active].buf.path.as_deref() != Some(path.as_path()) {
-            match Pane::open(Some(path)) {
-                Ok(pane) => {
-                    let journal = Journal::new(pane.buf.path.as_deref());
-                    self.panes[self.active] = pane;
-                    self.recovery_journals[self.active] = journal;
-                    self.doc_stats =
-                        crate::stats::DocStats::from_rope(&self.panes[self.active].buf.rope);
-                }
-                Err(e) => {
-                    self.status_msg = Some(format!("Failed to open for replace: {e}"));
-                    return;
-                }
+            if let Err(e) = self.switch_active_pane(path) {
+                self.status_msg = Some(format!("Failed to open for replace: {e}"));
+                return;
             }
         }
 
@@ -2895,15 +3036,8 @@ impl App {
                 if self.panes[self.active].buf.dirty {
                     self.save();
                 }
-                match Pane::open(Some(path.clone())) {
-                    Ok(pane) => {
-                        let journal = Journal::new(pane.buf.path.as_deref());
-                        self.panes[self.active] = pane;
-                        self.recovery_journals[self.active] = journal;
-                        self.doc_stats =
-                            crate::stats::DocStats::from_rope(&self.panes[self.active].buf.rope);
-                    }
-                    Err(_) => continue,
+                if self.switch_active_pane(path.clone()).is_err() {
+                    continue;
                 }
             }
             last_path = Some(path.clone());
@@ -3004,11 +3138,23 @@ impl App {
             _ => return,
         };
         let last = count.saturating_sub(1);
-        let new_selected = match key.code {
-            KeyCode::Esc => {
-                self.mode = Mode::Normal;
+        match list_nav_key(&key) {
+            ListNav::Dismiss => { self.mode = Mode::Normal; return; }
+            ListNav::Up => {
+                if let Mode::Revisions { selected, .. } = &mut self.mode {
+                    *selected = selected.saturating_sub(1);
+                }
                 return;
             }
+            ListNav::Down => {
+                if let Mode::Revisions { selected, .. } = &mut self.mode {
+                    *selected = (*selected + 1).min(last);
+                }
+                return;
+            }
+            ListNav::Other => {}
+        }
+        let new_selected = match key.code {
             KeyCode::Enter => {
                 self.revisions_diff(selected);
                 return;
@@ -3021,10 +3167,6 @@ impl App {
                 self.revisions_mark(selected);
                 return;
             }
-            KeyCode::Up => selected.saturating_sub(1),
-            KeyCode::Down => selected + 1,
-            KeyCode::Char('e') if ctrl => selected.saturating_sub(1),
-            KeyCode::Char('x') if ctrl => selected + 1,
             KeyCode::Home => 0,
             KeyCode::End => last,
             _ => return,
