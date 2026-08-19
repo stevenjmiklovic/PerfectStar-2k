@@ -300,19 +300,46 @@ Effort key: **S** ≤ half day · **M** ~1–2 days · **L** ~3–5 days.
 
 ## Phase 9 — P1: Notes / research sidecar (R5)
 
-- [ ] **9.1 [gate] Sidecar meta model.** Per-doc synopsis + notes as JSON under
+- [x] **9.1 [gate] Sidecar meta model.** Per-doc synopsis + notes as JSON under
   `meta/`, keyed by path hash; autosave on idle tick. · Req: R5.1, R5.6 ·
   Design §4.5 · Files: `meta.rs` (new), `app.rs` · **M**
+  **Deviation, deliberate:** the design called for one JSON record holding both
+  synopsis and notes. Shipped as two sidecars — `<key>.json` for the synopsis
+  (and Phase 10's annotations, whose unknown fields are already round-tripped
+  via `#[serde(flatten)]`) and `<key>-notes.md` for freeform notes. Prose in a
+  JSON string could only be edited through a prompt, with no undo, search,
+  spellcheck, or crash journal; as a Markdown document it opens in an ordinary
+  pane and gets all of them, which also satisfies R5.6 through the existing
+  autosave rather than new plumbing. The synopsis is committed on Enter (`^PI`,
+  pre-filled for editing), which is stronger than an idle tick.
 
-- [ ] **9.2 Project note docs.** `role = Note` flag on `DocEntry`; note docs
+- [x] **9.2 Project note docs.** `role = Note` flag on `DocEntry`; note docs
   open like any file and are excluded from compile. · Req: R5.2 · Files:
   `project.rs`, `meta.rs` · **S**
+  **Notes:** `DocRole::{Manuscript, Note}`, `#[serde(default)]` so manifests
+  written before notes existed compile exactly as before. Compile skips notes
+  regardless of `include_in_compile` — the role is the durable statement of
+  intent. `^PM` marks the selected binder document either way, and it persists.
 
-- [ ] **9.3 Synopsis in binder + open-in-split.** Secondary binder line;
+- [x] **9.3 Synopsis in binder + open-in-split.** Secondary binder line;
   command to open a chosen note in a split via existing `^OK`. · Req: R5.3,
   R5.4 · Files: `ui.rs`, `app.rs` · **S**
+  **Notes:** the binder draws a dimmed, clipped synopsis row under each document
+  that has one, marks notes `[note]`, and sizes itself from the rows it will
+  actually draw. `^PV` opens the selected document beside the manuscript and
+  `^PT` does the same for the current document's notes, both through one
+  `open_beside` helper that refuses rather than replace a window holding unsaved
+  work (C3).
 
-- [ ] **9.4 Tests.** Sidecar round-trip; note docs excluded from compile. · **S**
+- [x] **9.4 Tests.** Sidecar round-trip; note docs excluded from compile. · **S**
+  **Result:** 19 tests — 7 sidecar (path shape, round-trip/clear, lazy creation,
+  one-line collapsing, forward-compatible unknown fields, corrupt file, atomic
+  write), 3 project (compile exclusion both ways, legacy manifest, role
+  persistence), 7 app-level (pre-filled prompt, clearing, unsaved-document
+  refusal, notes split + save, clobber refusal, note marking + compile, binder
+  split, binder synopses), 2 render. 249 pass. Plus
+  `tests/harness/smoke_notes.py` end-to-end, which also covers the `^P` prefix
+  dispatch the unit tests bypass.
 
 ---
 

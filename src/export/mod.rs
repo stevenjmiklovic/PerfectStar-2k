@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn project_compile_order_and_separator_reach_export_model() {
-        use crate::project::{DocEntry, Project, ProjectManifest, Separator};
+        use crate::project::{DocEntry, DocRole, Project, ProjectManifest, Separator};
 
         let dir = std::env::temp_dir().join(format!("pstar-export-order-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -304,11 +304,13 @@ mod tests {
                         path: dir.join("first.md"),
                         title: String::from("First"),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                     DocEntry {
                         path: dir.join("second.md"),
                         title: String::from("Second"),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                 ],
                 separator: Separator::PageBreak,
@@ -336,7 +338,7 @@ mod tests {
 
     #[test]
     fn blank_lines_separator_becomes_separator_block() {
-        use crate::project::{DocEntry, Project, ProjectManifest, Separator};
+        use crate::project::{DocEntry, DocRole, Project, ProjectManifest, Separator};
 
         let dir = std::env::temp_dir().join(format!("pstar-export-blsep-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -352,11 +354,13 @@ mod tests {
                         path: dir.join("a.md"),
                         title: String::from("A"),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                     DocEntry {
                         path: dir.join("b.md"),
                         title: String::from("B"),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                 ],
                 separator: Separator::BlankLines,

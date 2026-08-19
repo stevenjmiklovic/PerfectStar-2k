@@ -22,6 +22,7 @@ python3 -m venv .harness-venv
 | `bench_latency.py` | Opens the fixture, types a burst, measures per-keystroke round-trip latency against a budget. Exits non-zero on regression. |
 | `smoke_snapshots.py` | End-to-end walk of the R4 snapshot flow: `^KN` label → revise → `^KO` list → Enter diff → `^R` restore → `^U` undo. Exits non-zero on any failed screen check. |
 | `smoke_sprint_focus.py` | End-to-end walk of R3: `^OF` focus mode on/off (chrome actually leaves and returns) and a word-target sprint (`^OP`) driven to completion by typing. |
+| `smoke_notes.py` | End-to-end walk of R5: `^PI` synopsis (including the pre-filled re-prompt), `^PT` notes in a split, and the binder's synopsis line and `^PM` note marking. Also covers `^P` prefix dispatch, which the unit tests bypass. |
 
 ## Running the smoke tests
 
@@ -37,6 +38,11 @@ deletes only what it created.
 Assert with `wait_for`, not a bare screen read after `send`: the app needs a turn
 of its event loop to process keys and redraw. Note also that `display()` returns a
 *list of rows* — use `text()` for substring checks.
+
+**A bare `ESC` needs the app to settle before the next key.** `ESC` is ambiguous
+until the following byte arrives, so `send_raw(b"\x1b")` immediately followed by
+another key is read as `Alt+<key>` and both are swallowed. Follow an `ESC` with a
+`wait_for` on whatever proves the mode actually changed.
 
 ## Running the latency bench
 

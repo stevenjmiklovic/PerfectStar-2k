@@ -8,6 +8,7 @@ mod history;
 mod keymap;
 mod killring;
 mod markdown;
+mod meta;
 mod normalize;
 mod outline;
 mod pane;

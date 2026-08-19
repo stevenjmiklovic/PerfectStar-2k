@@ -1,5 +1,5 @@
 use super::*;
-use crate::project::{DocEntry, ProjectManifest};
+use crate::project::{DocEntry, DocRole, ProjectManifest};
 use ropey::Rope;
 
 fn scratch_dir(tag: &str) -> std::path::PathBuf {
@@ -446,16 +446,19 @@ fn setup_test_project() -> (std::path::PathBuf, Project) {
                     path: doc1,
                     title: "Doc 1".to_string(),
                     include_in_compile: true,
+                    role: DocRole::Manuscript,
                 },
                 crate::project::DocEntry {
                     path: doc2,
                     title: "Doc 2".to_string(),
                     include_in_compile: true,
+                    role: DocRole::Manuscript,
                 },
                 crate::project::DocEntry {
                     path: doc3,
                     title: "Doc 3".to_string(),
                     include_in_compile: true,
+                    role: DocRole::Manuscript,
                 },
             ],
             separator: crate::project::Separator::PageBreak,
@@ -484,12 +487,14 @@ fn binder_move_up_at_top_is_noop() {
                 title: "Doc 1".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
             BinderEntry {
                 idx: 1,
                 title: "Doc 2".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
         ],
         selected: 0,
@@ -522,18 +527,21 @@ fn binder_move_down_at_bottom_is_noop() {
                 title: "Doc 1".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
             BinderEntry {
                 idx: 1,
                 title: "Doc 2".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
             BinderEntry {
                 idx: 2,
                 title: "Doc 3".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
         ],
         selected: 2,
@@ -565,18 +573,21 @@ fn binder_move_up_reorders_and_saves() {
                 title: "Doc 1".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
             BinderEntry {
                 idx: 1,
                 title: "Doc 2".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
             BinderEntry {
                 idx: 2,
                 title: "Doc 3".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
         ],
         selected: 1,
@@ -613,18 +624,21 @@ fn binder_move_down_reorders_and_saves() {
                 title: "Doc 1".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
             BinderEntry {
                 idx: 1,
                 title: "Doc 2".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
             BinderEntry {
                 idx: 2,
                 title: "Doc 3".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
         ],
         selected: 0,
@@ -706,18 +720,21 @@ fn project_remove_doc_removes_and_saves() {
                 title: "Doc 1".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
             BinderEntry {
                 idx: 1,
                 title: "Doc 2".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
             BinderEntry {
                 idx: 2,
                 title: "Doc 3".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
         ],
         selected: 1,
@@ -755,6 +772,7 @@ fn project_remove_doc_shows_clear_message() {
             title: "Doc 1".to_string(),
             word_count: Some(3),
             exists: true,
+            synopsis: String::new(),
         }],
         selected: 0,
     };
@@ -786,18 +804,21 @@ fn project_remove_last_doc_adjusts_selection() {
                 title: "Doc 1".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
             BinderEntry {
                 idx: 1,
                 title: "Doc 2".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
             BinderEntry {
                 idx: 2,
                 title: "Doc 3".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
         ],
         selected: 2,
@@ -844,16 +865,19 @@ fn missing_file_resilience_in_binder() {
                     path: doc1.clone(),
                     title: "Existing Doc 1".to_string(),
                     include_in_compile: true,
+                    role: DocRole::Manuscript,
                 },
                 DocEntry {
                     path: doc2.clone(),
                     title: "Missing Doc".to_string(),
                     include_in_compile: true,
+                    role: DocRole::Manuscript,
                 },
                 DocEntry {
                     path: doc3.clone(),
                     title: "Existing Doc 3".to_string(),
                     include_in_compile: true,
+                    role: DocRole::Manuscript,
                 },
             ],
             separator: crate::project::Separator::PageBreak,
@@ -913,18 +937,21 @@ fn missing_file_resilience_in_binder() {
                 title: "Existing Doc 1".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
             BinderEntry {
                 idx: 1,
                 title: "Missing Doc".to_string(),
                 word_count: None,
                 exists: false,
+                synopsis: String::new(),
             },
             BinderEntry {
                 idx: 2,
                 title: "Existing Doc 3".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
         ],
         selected: 1, // Select the missing file
@@ -952,18 +979,21 @@ fn missing_file_resilience_in_binder() {
                 title: "Existing Doc 1".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
             BinderEntry {
                 idx: 1,
                 title: "Missing Doc".to_string(),
                 word_count: None,
                 exists: false,
+                synopsis: String::new(),
             },
             BinderEntry {
                 idx: 2,
                 title: "Existing Doc 3".to_string(),
                 word_count: Some(3),
                 exists: true,
+                synopsis: String::new(),
             },
         ],
         selected: 0, // Select existing file
@@ -1587,6 +1617,251 @@ fn the_sprint_report_survives_the_keystroke_that_ends_the_sprint() {
     // Starting the next sprint clears the last one's report.
     app.execute(Cmd::SprintStart);
     assert!(app.sprint_banner().is_none());
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// --- Phase 9: notes, synopsis, and note documents (R5) ----------------------
+
+/// A test app whose sidecar root is a temporary directory.
+fn notes_app(tag: &str, text: &str) -> (PathBuf, PathBuf, App) {
+    let (dir, source, mut app) = test_app(tag, text);
+    app.meta_root = Some(dir.join("meta"));
+    (dir, source, app)
+}
+
+#[test]
+fn the_synopsis_prompt_is_prefilled_and_saves_to_the_sidecar() {
+    let (dir, source, mut app) = notes_app("synopsis", "Chapter One\n");
+    let root = app.meta_root.clone().unwrap();
+
+    app.execute(Cmd::EditSynopsis);
+    match &app.mode {
+        Mode::Input { value, action, .. } => {
+            assert_eq!(*action, InputAction::Synopsis);
+            assert_eq!(value, "", "nothing written yet");
+        }
+        _ => panic!("^PI should prompt for a synopsis"),
+    }
+    typed(&mut app, "Marcus finds the knife.");
+    app.handle_key(plain(KeyCode::Enter));
+
+    assert_eq!(
+        crate::meta::synopsis(&root, &source),
+        "Marcus finds the knife."
+    );
+    assert!(app.status_msg.as_ref().unwrap().contains("Synopsis saved"));
+    // R5.1: never written beside the manuscript. (That the production root is
+    // the platform metadata directory is asserted in meta.rs's own tests.)
+    assert_ne!(
+        crate::meta::meta_path(&root, &source).parent(),
+        source.parent()
+    );
+
+    // Re-prompting offers the current text for editing rather than a blank line.
+    app.execute(Cmd::EditSynopsis);
+    match &app.mode {
+        Mode::Input { value, .. } => assert_eq!(value, "Marcus finds the knife."),
+        _ => panic!("expected the synopsis prompt"),
+    }
+    // Enter accepts the pre-filled line unchanged.
+    app.handle_key(plain(KeyCode::Enter));
+    assert_eq!(
+        crate::meta::synopsis(&root, &source),
+        "Marcus finds the knife."
+    );
+
+    // Emptying the line and pressing Enter clears it — for this prompt an empty
+    // answer is an answer, not a cancel.
+    app.execute(Cmd::EditSynopsis);
+    for _ in 0.."Marcus finds the knife.".len() {
+        app.handle_key(plain(KeyCode::Backspace));
+    }
+    app.handle_key(plain(KeyCode::Enter));
+    assert_eq!(crate::meta::synopsis(&root, &source), "");
+    assert!(app.status_msg.as_ref().unwrap().contains("cleared"));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn metadata_needs_a_saved_document() {
+    let mut app = App::new(None).unwrap();
+    app.splash = false;
+    app.insert_text("unsaved", EditKind::Other);
+
+    app.execute(Cmd::EditSynopsis);
+    assert!(matches!(app.mode, Mode::Normal), "no prompt without a path");
+    assert!(
+        app.status_msg
+            .as_ref()
+            .unwrap()
+            .contains("Save the document"),
+        "{:?}",
+        app.status_msg
+    );
+
+    app.execute(Cmd::OpenNotes);
+    assert_eq!(
+        app.panes.len(),
+        1,
+        "no split without somewhere to key notes"
+    );
+}
+
+#[test]
+fn notes_open_beside_the_manuscript_as_an_ordinary_document() {
+    let (dir, source, mut app) = notes_app("notes-split", "the manuscript\n");
+    let root = app.meta_root.clone().unwrap();
+
+    app.execute(Cmd::OpenNotes);
+
+    assert_eq!(app.panes.len(), 2, "R5.4: notes open in a split");
+    assert_eq!(app.active, 1, "focus follows the notes");
+    assert_eq!(
+        app.buf.path.as_deref(),
+        Some(crate::meta::notes_path(&root, &source).as_path())
+    );
+    assert_eq!(app.buf.rope.to_string(), "", "a fresh notes file is empty");
+
+    // They are a real document: type, save, and the sidecar is on disk with the
+    // ordinary atomic-save path (R5.6 comes free with that).
+    app.insert_text("Marcus: left-handed.\n", EditKind::Other);
+    app.execute(Cmd::Save);
+    assert!(!app.buf.dirty, "{:?}", app.status_msg);
+    assert_eq!(
+        std::fs::read_to_string(crate::meta::notes_path(&root, &source)).unwrap(),
+        "Marcus: left-handed.\n"
+    );
+    // The manuscript itself is untouched.
+    assert_eq!(
+        std::fs::read_to_string(&source).unwrap(),
+        "the manuscript\n"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn opening_beside_never_discards_unsaved_work_in_the_other_window() {
+    let (dir, _source, mut app) = notes_app("notes-clobber", "manuscript\n");
+    app.execute(Cmd::OpenNotes);
+    assert_eq!(app.panes.len(), 2);
+
+    // Leave unsaved work in the notes pane, go back to the manuscript, and ask
+    // for the notes again — the pane holding unsaved text must not be replaced.
+    app.insert_text("unsaved research", EditKind::Other);
+    app.active = 0;
+    app.execute(Cmd::OpenNotes);
+
+    assert_eq!(app.active, 0, "focus stays put when the command refuses");
+    assert_eq!(app.panes[1].buf.rope.to_string(), "unsaved research");
+    assert!(
+        app.status_msg.as_ref().unwrap().contains("unsaved changes"),
+        "{:?}",
+        app.status_msg
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A project with a chapter and a character sheet, plus an app holding it.
+fn project_with_note(tag: &str) -> (PathBuf, App) {
+    let (dir, _source, mut app) = notes_app(tag, "chapter text\n");
+    let chapter = dir.join("chapter1.md");
+    let characters = dir.join("characters.md");
+    std::fs::write(&chapter, "Chapter one text.\n").unwrap();
+    std::fs::write(&characters, "Marcus: carries a knife.\n").unwrap();
+    let manifest_path = dir.join("book.pstarproj");
+    let project = Project {
+        manifest_path: manifest_path.clone(),
+        manifest: ProjectManifest {
+            name: String::from("Book"),
+            docs: vec![
+                DocEntry {
+                    path: chapter,
+                    title: String::from("Chapter One"),
+                    include_in_compile: true,
+                    role: DocRole::Manuscript,
+                },
+                DocEntry {
+                    path: characters,
+                    title: String::from("Characters"),
+                    include_in_compile: true,
+                    role: DocRole::Manuscript,
+                },
+            ],
+            separator: crate::project::Separator::None,
+        },
+    };
+    project.save().unwrap();
+    app.project = Some(Project::load(&manifest_path).unwrap());
+    (dir, app)
+}
+
+#[test]
+fn marking_a_binder_document_as_a_note_persists_and_drops_it_from_compile() {
+    let (dir, mut app) = project_with_note("mark-note");
+    app.execute(Cmd::BinderToggle);
+    // Select the character sheet.
+    app.handle_key(plain(KeyCode::Down));
+
+    app.execute(Cmd::ToggleDocRole);
+
+    assert!(app.project.as_ref().unwrap().doc_is_note(1));
+    let compiled = app.project.as_ref().unwrap().compile();
+    assert!(compiled.text.contains("Chapter one text."));
+    assert!(!compiled.text.contains("Marcus"), "{:?}", compiled.text);
+    assert!(app.status_msg.as_ref().unwrap().contains("note"));
+    // Persisted, and the binder is still open on the same row.
+    let manifest_path = app.project.as_ref().unwrap().manifest_path.clone();
+    assert!(Project::load(&manifest_path).unwrap().doc_is_note(1));
+    match &app.mode {
+        Mode::Binder { selected, .. } => assert_eq!(*selected, 1),
+        _ => panic!("the binder should stay open"),
+    }
+
+    // And it is reversible.
+    app.execute(Cmd::ToggleDocRole);
+    assert!(!app.project.as_ref().unwrap().doc_is_note(1));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_binder_opens_the_selected_document_in_a_split() {
+    let (dir, mut app) = project_with_note("binder-split");
+    app.execute(Cmd::BinderToggle);
+    app.handle_key(plain(KeyCode::Down));
+
+    app.execute(Cmd::BinderOpenSplit);
+
+    assert_eq!(app.panes.len(), 2, "R5.4");
+    assert!(
+        matches!(app.mode, Mode::Normal),
+        "the binder closes behind it"
+    );
+    assert_eq!(app.buf.rope.to_string(), "Marcus: carries a knife.\n");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn binder_rows_carry_each_documents_synopsis() {
+    let (dir, mut app) = project_with_note("binder-synopsis");
+    let root = app.meta_root.clone().unwrap();
+    let chapter = app.project.as_ref().unwrap().manifest.docs[0].path.clone();
+    crate::meta::set_synopsis(&root, &chapter, "Marcus finds the knife.").unwrap();
+
+    app.execute(Cmd::BinderToggle);
+
+    match &app.mode {
+        Mode::Binder { entries, .. } => {
+            assert_eq!(entries[0].synopsis, "Marcus finds the knife.");
+            assert_eq!(entries[1].synopsis, "", "no sidecar, no secondary line");
+        }
+        _ => panic!("expected the binder"),
+    }
 
     let _ = std::fs::remove_dir_all(dir);
 }

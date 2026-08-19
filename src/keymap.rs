@@ -133,6 +133,15 @@ pub enum Cmd {
     SprintStart,
     /// Distraction-free view: text only (R3.3).
     FocusMode,
+    /// Notes & research (R5)
+    /// Edit this document's one-line synopsis (R5.1, R5.3).
+    EditSynopsis,
+    /// Open this document's freeform notes in a split (R5.1, R5.4).
+    OpenNotes,
+    /// Mark the selected binder document as a note, or back (R5.2).
+    ToggleDocRole,
+    /// Open the selected binder document in a split (R5.4).
+    BinderOpenSplit,
 }
 
 /// How a command is typed.
@@ -609,6 +618,27 @@ pub const BINDINGS: &[Binding] = &[
         cmd: Cmd::ProjectReplace,
         chord: Pref(P, 'w'),
         name: "project replace",
+    },
+    // Notes & research sit under ^P with the rest of the project furniture.
+    Binding {
+        cmd: Cmd::EditSynopsis,
+        chord: Pref(P, 'i'),
+        name: "document synopsis",
+    },
+    Binding {
+        cmd: Cmd::OpenNotes,
+        chord: Pref(P, 't'),
+        name: "document notes in a split",
+    },
+    Binding {
+        cmd: Cmd::ToggleDocRole,
+        chord: Pref(P, 'm'),
+        name: "binder: mark document as note",
+    },
+    Binding {
+        cmd: Cmd::BinderOpenSplit,
+        chord: Pref(P, 'v'),
+        name: "binder: open document in a split",
     },
 ];
 

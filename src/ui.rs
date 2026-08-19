@@ -560,7 +560,12 @@ fn status_left(app: &App) -> String {
         Mode::Input { label, value, .. } => format!(" {label}: {value}▌"),
         Mode::Palette { .. } => String::from(" ↑↓ select · Enter run · Esc close"),
         Mode::Outline { .. } => String::from(" ↑↓ select · Enter go to heading · Esc close"),
-        Mode::Binder { .. } => String::from(" ↑↓ select · Enter open document · Esc close"),
+        Mode::Binder { .. } => match &app.status_msg {
+            Some(msg) => format!(" {msg}"),
+            None => String::from(
+                " ↑↓ select · Enter open · ^PV split · ^PM note · ^PE/^PX move · Esc close",
+            ),
+        },
         Mode::Stats => String::from(" Writing Stats · press any key to close"),
         Mode::ProjectSearch { query, results, .. } => {
             format!(
@@ -921,8 +926,14 @@ fn draw_binder(frame: &mut Frame, app: &App, text_area: Rect) {
     };
 
     let width = (text_area.width.saturating_sub(8)).clamp(40, 70);
-    let max_list = (text_area.height as usize).saturating_sub(4).clamp(3, 14);
-    let height = (entries.len().clamp(1, max_list) + 2) as u16;
+    // A document with a synopsis takes a second row (R5.3), so the panel is
+    // sized from the rows it will actually draw rather than the doc count.
+    let rows_per_entry = |entry: &crate::app::BinderEntry| {
+        if entry.synopsis.is_empty() { 1 } else { 2 }
+    };
+    let total_rows: usize = entries.iter().map(rows_per_entry).sum();
+    let max_list = (text_area.height as usize).saturating_sub(4).clamp(3, 16);
+    let height = (total_rows.clamp(1, max_list) + 2) as u16;
     let area = Rect {
         x: text_area.x + (text_area.width - width) / 2,
         y: text_area.y + 1,
@@ -931,21 +942,54 @@ fn draw_binder(frame: &mut Frame, app: &App, text_area: Rect) {
     };
 
     let visible = (area.height as usize).saturating_sub(2);
-    let first = selected.saturating_sub(visible.saturating_sub(1));
+    // Scroll by entries, but keep the selected one's rows in view.
+    let first = entries
+        .iter()
+        .enumerate()
+        .take(selected + 1)
+        .rev()
+        .scan(0usize, |used, (i, entry)| {
+            *used += rows_per_entry(entry);
+            Some((i, *used))
+        })
+        .take_while(|(_, used)| *used <= visible.max(1))
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(*selected);
+    let inner = area.width.saturating_sub(2) as usize;
     let mut lines: Vec<Line> = Vec::new();
 
-    for (i, entry) in entries.iter().enumerate().skip(first).take(visible) {
+    for (i, entry) in entries.iter().enumerate().skip(first) {
+        if lines.len() >= visible {
+            break;
+        }
         let wc_str = match entry.word_count {
             Some(wc) => format!("{wc} words"),
             None => String::from("—"),
         };
         let missing_marker = if !entry.exists { " [MISSING]" } else { "" };
-        let inner = area.width.saturating_sub(2) as usize;
+        // A note is not part of the book (R5.2); saying so here is what explains
+        // its absence from a compile.
+        let note_marker = if app
+            .project
+            .as_ref()
+            .is_some_and(|project| project.doc_is_note(entry.idx))
+        {
+            " [note]"
+        } else {
+            ""
+        };
         let pad = inner
-            .saturating_sub(entry.title.len() + wc_str.len() + missing_marker.len() + 3)
+            .saturating_sub(
+                UnicodeWidthStr::width(entry.title.as_str())
+                    + missing_marker.len()
+                    + note_marker.len()
+                    + wc_str.len()
+                    + 3,
+            )
             .max(1);
         let row = format!(
-            " {}{missing_marker}{}{wc_str}  ",
+            " {}{missing_marker}{note_marker}{}{wc_str}  ",
             entry.title,
             " ".repeat(pad)
         );
@@ -956,6 +1000,19 @@ fn draw_binder(frame: &mut Frame, app: &App, text_area: Rect) {
             lines.push(Line::from(Span::styled(row, app.theme.dim)));
         } else {
             lines.push(Line::from(row));
+        }
+
+        // The synopsis as a dimmed secondary line, clipped to the panel (R5.3).
+        if !entry.synopsis.is_empty() && lines.len() < visible {
+            let room = inner.saturating_sub(5);
+            let mut text: String = entry.synopsis.chars().take(room).collect();
+            if entry.synopsis.chars().count() > room {
+                text.push('…');
+            }
+            lines.push(Line::from(Span::styled(
+                format!("   {text}"),
+                app.theme.dim,
+            )));
         }
     }
 
@@ -1473,6 +1530,66 @@ mod tests {
             !screen.contains("90 words in 5:00 ✓"),
             "unmet target: {screen}"
         );
+    }
+
+    #[test]
+    fn the_binder_shows_synopses_as_secondary_lines_and_marks_notes() {
+        let mut app = app_with("");
+        app.mode = Mode::Binder {
+            entries: vec![
+                crate::app::BinderEntry {
+                    idx: 0,
+                    title: String::from("Chapter One"),
+                    word_count: Some(1200),
+                    exists: true,
+                    synopsis: String::from("Marcus finds the knife."),
+                },
+                crate::app::BinderEntry {
+                    idx: 1,
+                    title: String::from("Characters"),
+                    word_count: Some(80),
+                    exists: true,
+                    synopsis: String::new(),
+                },
+            ],
+            selected: 0,
+        };
+
+        let screen = screen(&mut app).join("\n");
+        assert!(screen.contains("Chapter One"), "{screen}");
+        assert!(screen.contains("1200 words"), "{screen}");
+        // R5.3: the synopsis as a secondary line under its document.
+        assert!(screen.contains("Marcus finds the knife."), "{screen}");
+        // A document with no synopsis gets no second row.
+        let rows: Vec<&str> = screen
+            .lines()
+            .filter(|r| r.contains("Characters"))
+            .collect();
+        assert_eq!(rows.len(), 1, "{screen}");
+        assert!(
+            screen.contains("^PM note"),
+            "the keys are advertised: {screen}"
+        );
+    }
+
+    #[test]
+    fn a_long_synopsis_is_clipped_to_the_panel() {
+        let mut app = app_with("");
+        app.mode = Mode::Binder {
+            entries: vec![crate::app::BinderEntry {
+                idx: 0,
+                title: String::from("Chapter One"),
+                word_count: Some(10),
+                exists: true,
+                synopsis: "word ".repeat(60),
+            }],
+            selected: 0,
+        };
+
+        // The frame renders and every row stays inside the terminal.
+        let rows = screen(&mut app);
+        assert!(rows.iter().all(|row| row.chars().count() == 80));
+        assert!(rows.join("\n").contains('…'), "clipped with an ellipsis");
     }
 
     #[test]

@@ -50,6 +50,17 @@ impl Separator {
     }
 }
 
+/// What a document in the project is *for* (R5.2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DocRole {
+    /// Part of the book itself.
+    #[default]
+    Manuscript,
+    /// Characters, places, timeline, research — edited in `pstar` like any
+    /// document, and never part of the compiled manuscript.
+    Note,
+}
+
 /// A document entry in the project manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocEntry {
@@ -63,6 +74,17 @@ pub struct DocEntry {
     /// scratch/notes files that aren't part of the exported manuscript.
     #[serde(default = "default_true")]
     pub include_in_compile: bool,
+    /// Manuscript or note (R5.2). Defaults to manuscript, so manifests written
+    /// before notes existed keep compiling exactly as they did.
+    #[serde(default)]
+    pub role: DocRole,
+}
+
+impl DocEntry {
+    /// Whether this is a note document rather than part of the book.
+    pub fn is_note(&self) -> bool {
+        self.role == DocRole::Note
+    }
 }
 
 fn default_true() -> bool {
@@ -186,7 +208,28 @@ impl Project {
             path,
             title,
             include_in_compile: true,
+            role: DocRole::Manuscript,
         });
+    }
+
+    /// Flip a document between manuscript and note (R5.2), returning its new
+    /// role. Marking a document as a note takes it out of the compile; marking
+    /// it back restores it, so the gesture is reversible.
+    pub fn toggle_role(&mut self, idx: usize) -> Option<DocRole> {
+        let entry = self.manifest.docs.get_mut(idx)?;
+        entry.role = match entry.role {
+            DocRole::Manuscript => DocRole::Note,
+            DocRole::Note => DocRole::Manuscript,
+        };
+        Some(entry.role)
+    }
+
+    /// Whether the document at `idx` is a note.
+    pub fn doc_is_note(&self, idx: usize) -> bool {
+        self.manifest
+            .docs
+            .get(idx)
+            .is_some_and(|entry| entry.is_note())
     }
 
     /// Remove a document from the project by index. The file on disk is never
@@ -235,7 +278,9 @@ impl Project {
         let mut first = true;
 
         for (idx, entry) in self.manifest.docs.iter().enumerate() {
-            if !entry.include_in_compile {
+            // A note document is never part of the book (R5.2), whatever its
+            // include flag says — the role is the durable statement of intent.
+            if !entry.include_in_compile || entry.is_note() {
                 continue;
             }
 
@@ -298,11 +343,13 @@ mod tests {
                     path: PathBuf::from("chapter1.md"),
                     title: "Chapter One".to_string(),
                     include_in_compile: true,
+                    role: DocRole::Manuscript,
                 },
                 DocEntry {
                     path: PathBuf::from("notes.md"),
                     title: "Research Notes".to_string(),
                     include_in_compile: false,
+                    role: DocRole::Manuscript,
                 },
             ],
             separator: Separator::PageBreak,
@@ -336,6 +383,7 @@ mod tests {
                     path: dir.join("chapter1.md"),
                     title: "Chapter 1".to_string(),
                     include_in_compile: true,
+                    role: DocRole::Manuscript,
                 }],
                 separator: Separator::BlankLines,
             },
@@ -373,6 +421,7 @@ mod tests {
                     path: dir.join("chapter1.md"), // absolute
                     title: "Ch1".to_string(),
                     include_in_compile: true,
+                    role: DocRole::Manuscript,
                 }],
                 separator: Separator::None,
             },
@@ -422,16 +471,19 @@ mod tests {
                         path: PathBuf::from("a.md"),
                         title: "A".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                     DocEntry {
                         path: PathBuf::from("b.md"),
                         title: "B".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                     DocEntry {
                         path: PathBuf::from("c.md"),
                         title: "C".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                 ],
                 separator: Separator::PageBreak,
@@ -464,11 +516,13 @@ mod tests {
                         path: existing,
                         title: "Existing".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                     DocEntry {
                         path: missing,
                         title: "Missing".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                 ],
                 separator: Separator::PageBreak,
@@ -506,6 +560,7 @@ mod tests {
                     path: doc1,
                     title: "Doc 1".to_string(),
                     include_in_compile: true,
+                    role: DocRole::Manuscript,
                 }],
                 separator: Separator::PageBreak,
             },
@@ -533,6 +588,7 @@ mod tests {
                     path: missing,
                     title: "Missing".to_string(),
                     include_in_compile: true,
+                    role: DocRole::Manuscript,
                 }],
                 separator: Separator::PageBreak,
             },
@@ -638,16 +694,19 @@ mod tests {
                         path: dir.join("ch1.md"),
                         title: "Chapter 1".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                     DocEntry {
                         path: dir.join("ch2.md"),
                         title: "Chapter 2".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                     DocEntry {
                         path: dir.join("ch3.md"),
                         title: "Chapter 3".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                 ],
                 separator: Separator::PageBreak,
@@ -683,16 +742,19 @@ mod tests {
                         path: dir.join("ch1.md"),
                         title: "Chapter 1".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                     DocEntry {
                         path: dir.join("notes.md"),
                         title: "Notes".to_string(),
                         include_in_compile: false, // excluded
+                        role: DocRole::Manuscript,
                     },
                     DocEntry {
                         path: dir.join("ch2.md"),
                         title: "Chapter 2".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                 ],
                 separator: Separator::BlankLines,
@@ -727,16 +789,19 @@ mod tests {
                         path: dir.join("ch1.md"),
                         title: "Chapter 1".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                     DocEntry {
                         path: dir.join("ch2.md"),
                         title: "Chapter 2".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                     DocEntry {
                         path: dir.join("ch3.md"),
                         title: "Chapter 3".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                 ],
                 separator: Separator::HorizontalRule,
@@ -772,11 +837,13 @@ mod tests {
                         path: dir.join("scene1.md"),
                         title: "Scene 1".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                     DocEntry {
                         path: dir.join("scene2.md"),
                         title: "Scene 2".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                 ],
                 separator: Separator::None,
@@ -823,6 +890,7 @@ mod tests {
                     path: dir.join("notes.md"),
                     title: "Notes".to_string(),
                     include_in_compile: false,
+                    role: DocRole::Manuscript,
                 }],
                 separator: Separator::PageBreak,
             },
@@ -856,16 +924,19 @@ mod tests {
                         path: dir.join("a.md"),
                         title: "A".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                     DocEntry {
                         path: dir.join("b.md"),
                         title: "B".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                     DocEntry {
                         path: dir.join("c.md"),
                         title: "C".to_string(),
                         include_in_compile: true,
+                        role: DocRole::Manuscript,
                     },
                 ],
                 separator: Separator::PageBreak,
@@ -959,6 +1030,7 @@ include_in_compile = true
                     path: dir.join("ch1.md"),
                     title: "Chapter 1".to_string(),
                     include_in_compile: true,
+                    role: DocRole::Manuscript,
                 }],
                 separator: Separator::PageBreak,
             },
@@ -970,5 +1042,98 @@ include_in_compile = true
         assert_eq!(result.text, "Only chapter.");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn note_documents_are_excluded_from_compile() {
+        // R5.2: a note is edited like any document but is never part of the book.
+        let dir = scratch("note-compile");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("chapter1.md"), "Chapter one text.").unwrap();
+        std::fs::write(dir.join("characters.md"), "Marcus: carries a knife.").unwrap();
+
+        let mut project = Project {
+            manifest_path: dir.join("book.pstarproj"),
+            manifest: ProjectManifest {
+                name: String::from("Book"),
+                docs: vec![
+                    DocEntry {
+                        path: dir.join("chapter1.md"),
+                        title: String::from("Chapter One"),
+                        include_in_compile: true,
+                        role: DocRole::Manuscript,
+                    },
+                    DocEntry {
+                        path: dir.join("characters.md"),
+                        title: String::from("Characters"),
+                        // Deliberately still flagged for compile: the role is
+                        // what keeps it out, so marking a doc as a note is
+                        // enough on its own.
+                        include_in_compile: true,
+                        role: DocRole::Note,
+                    },
+                ],
+                separator: Separator::None,
+            },
+        };
+
+        let compiled = project.compile();
+        assert!(compiled.text.contains("Chapter one text."));
+        assert!(
+            !compiled.text.contains("Marcus"),
+            "note text leaked into the manuscript: {:?}",
+            compiled.text
+        );
+        assert!(compiled.skipped.is_empty(), "a note is skipped silently");
+
+        // Marking it back restores it to the book.
+        assert_eq!(project.toggle_role(1), Some(DocRole::Manuscript));
+        assert!(project.compile().text.contains("Marcus"));
+        assert!(!project.doc_is_note(1));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_manifest_written_before_notes_existed_compiles_everything() {
+        // Manifests from earlier versions have no `role` key at all.
+        let manifest: ProjectManifest =
+            toml::from_str("name = 'Book'\n\n[[docs]]\npath = 'chapter1.md'\ntitle = 'One'\n")
+                .unwrap();
+
+        assert_eq!(manifest.docs[0].role, DocRole::Manuscript);
+        assert!(!manifest.docs[0].is_note());
+        assert!(manifest.docs[0].include_in_compile);
+    }
+
+    #[test]
+    fn a_documents_role_survives_a_manifest_round_trip() {
+        let dir = scratch("note-role-persist");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest_path = dir.join("book.pstarproj");
+
+        let mut project = Project {
+            manifest_path: manifest_path.clone(),
+            manifest: ProjectManifest {
+                name: String::from("Book"),
+                docs: vec![DocEntry {
+                    path: dir.join("characters.md"),
+                    title: String::from("Characters"),
+                    include_in_compile: true,
+                    role: DocRole::Manuscript,
+                }],
+                separator: Separator::PageBreak,
+            },
+        };
+        project.toggle_role(0);
+        project.save().unwrap();
+
+        let reloaded = Project::load(&manifest_path).unwrap();
+        assert!(reloaded.doc_is_note(0));
+        assert_eq!(reloaded.manifest.docs[0].role, DocRole::Note);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

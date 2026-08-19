@@ -17,10 +17,11 @@ use crate::export::{CompiledDoc, Exporter};
 use crate::history::{Edit, EditGroup, EditKind};
 use crate::keymap::{self, Cmd, Prefix};
 use crate::killring::{KillRing, PutCycle};
+use crate::meta;
 use crate::normalize;
 use crate::outline;
 use crate::pane::Pane;
-use crate::project::Project;
+use crate::project::{DocRole, Project};
 use crate::projsearch;
 use crate::recovery::{self, Journal};
 use crate::rtf;
@@ -96,6 +97,9 @@ pub enum InputAction {
     ProjectReplace,
     /// Sprint terms: `minutes[/words]` (^OP, R3.1).
     SprintSpec,
+    /// A document's one-line synopsis (^PI, R5.1). Like a snapshot label, an
+    /// empty answer is meaningful: it clears the synopsis.
+    Synopsis,
     /// Optional label for a snapshot taken with ^KN (R4.1). Unlike every other
     /// prompt, an empty answer is meaningful: take the snapshot unlabelled.
     SnapshotLabel,
@@ -172,6 +176,9 @@ pub struct BinderEntry {
     pub word_count: Option<usize>,
     /// Whether the file exists on disk.
     pub exists: bool,
+    /// The document's one-line synopsis from its sidecar, shown as the binder's
+    /// secondary line (R5.3). Read when the binder opens rather than per frame.
+    pub synopsis: String,
 }
 
 struct PendingRecovery {
@@ -231,6 +238,9 @@ pub struct App {
     backup_root: Option<PathBuf>,
     /// Root of the per-document snapshot tree; `None` disables snapshots.
     snapshot_root: Option<PathBuf>,
+    /// Root of the per-document sidecar tree (synopsis, notes); `None` disables
+    /// sidecar metadata (R5).
+    pub meta_root: Option<PathBuf>,
     /// One plain-text crash journal per pane, kept index-aligned with `panes`.
     recovery_journals: Vec<Journal>,
     /// Recovery text is loaded before prompting so a disappearing record can
@@ -338,6 +348,13 @@ impl App {
                 None
             } else {
                 crate::paths::snapshots()
+            },
+            // Same reasoning as `snapshot_root`: tests point this at a
+            // temporary directory rather than the writer's real sidecars.
+            meta_root: if cfg!(test) {
+                None
+            } else {
+                crate::paths::meta()
             },
             recovery_journals: vec![recovery_journal],
             pending_recovery: None,
@@ -1221,22 +1238,9 @@ impl App {
                 // if a project is loaded.
                 if matches!(self.mode, Mode::Binder { .. }) {
                     self.mode = Mode::Normal;
-                } else if let Some(ref project) = self.project {
-                    // Build the binder entries.
-                    let entries: Vec<BinderEntry> = project
-                        .manifest
-                        .docs
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, doc)| BinderEntry {
-                            idx,
-                            title: doc.title.clone(),
-                            word_count: project.doc_word_count(idx),
-                            exists: project.doc_exists(idx),
-                        })
-                        .collect();
+                } else if self.project.is_some() {
                     self.mode = Mode::Binder {
-                        entries,
+                        entries: self.binder_entries(),
                         selected: 0,
                     };
                 } else {
@@ -1320,6 +1324,10 @@ impl App {
                 }
             },
             Cmd::FocusMode => self.toggle_focus(),
+            Cmd::EditSynopsis => self.prompt_synopsis(),
+            Cmd::OpenNotes => self.open_notes(),
+            Cmd::ToggleDocRole => self.toggle_doc_role(),
+            Cmd::BinderOpenSplit => self.binder_open_split(),
         }
         if !matches!(cmd, Cmd::Undo) && !is_edit_cmd(cmd) {
             self.history.break_group();
@@ -1962,9 +1970,10 @@ impl App {
             KeyCode::Enter => {
                 let path = value.trim().to_string();
                 self.mode = Mode::Normal;
-                // An empty answer cancels every prompt that needs a path, but a
-                // snapshot without a label is a perfectly good snapshot.
-                if path.is_empty() && action != InputAction::SnapshotLabel {
+                // An empty answer cancels every prompt that needs a path, but an
+                // unlabelled snapshot and a cleared synopsis are both real
+                // answers.
+                if path.is_empty() && !allows_empty_answer(action) {
                     return;
                 }
                 match action {
@@ -2018,6 +2027,7 @@ impl App {
                         let label = (!path.is_empty()).then_some(path.as_str());
                         self.take_snapshot(label);
                     }
+                    InputAction::Synopsis => self.set_synopsis(&path),
                     InputAction::SprintSpec => {
                         let now = Instant::now();
                         match Sprint::parse(&path, self.doc_stats.words, now) {
@@ -2730,22 +2740,35 @@ impl App {
 
     /// Refresh the binder panel with updated entries, maintaining a specific selection.
     fn refresh_binder_with_selection(&mut self, new_selected: usize) {
-        if let Some(ref project) = self.project {
-            let entries: Vec<BinderEntry> = project
-                .manifest
-                .docs
-                .iter()
-                .enumerate()
-                .map(|(idx, doc)| BinderEntry {
-                    idx,
-                    title: doc.title.clone(),
-                    word_count: project.doc_word_count(idx),
-                    exists: project.doc_exists(idx),
-                })
-                .collect();
+        if self.project.is_some() {
+            let entries = self.binder_entries();
             let selected = new_selected.min(entries.len().saturating_sub(1));
             self.mode = Mode::Binder { entries, selected };
         }
+    }
+
+    /// The binder's rows: title, word count, existence, and each document's
+    /// synopsis from its sidecar (R1.2, R5.3).
+    fn binder_entries(&self) -> Vec<BinderEntry> {
+        let Some(ref project) = self.project else {
+            return Vec::new();
+        };
+        project
+            .manifest
+            .docs
+            .iter()
+            .enumerate()
+            .map(|(idx, doc)| BinderEntry {
+                idx,
+                title: doc.title.clone(),
+                word_count: project.doc_word_count(idx),
+                exists: project.doc_exists(idx),
+                synopsis: match &self.meta_root {
+                    Some(root) => meta::synopsis(root, &doc.path),
+                    None => String::new(),
+                },
+            })
+            .collect()
     }
 
     /// Add a document to the project (^PA, R1.5, task 1.4).
@@ -3089,6 +3112,166 @@ impl App {
         let _ = last_path; // suppress unused warning
         self.mode = Mode::Normal;
         self.status_msg = Some(format!("{count} replacement(s) made"));
+    }
+
+    // --- notes & research sidecar (R5) ---------------------------------------
+
+    /// The sidecar root and the active document's path, or `None` with a status
+    /// message saying why this document can't carry metadata.
+    fn meta_target(&mut self) -> Option<(PathBuf, PathBuf)> {
+        let Some(doc) = self.buf.path.clone() else {
+            self.status_msg = Some(String::from(
+                "Save the document first — notes are keyed to its path",
+            ));
+            return None;
+        };
+        let Some(root) = self.meta_root.clone() else {
+            self.status_msg = Some(String::from("No metadata directory available for notes"));
+            return None;
+        };
+        Some((root, doc))
+    }
+
+    /// ^PI: edit this document's synopsis, pre-filled with the current one so it
+    /// reads as editing rather than retyping (R5.1).
+    fn prompt_synopsis(&mut self) {
+        let Some((root, doc)) = self.meta_target() else {
+            return;
+        };
+        self.mode = Mode::Input {
+            // Pre-filled, so Enter accepts what's shown; emptying the line and
+            // pressing Enter is how a synopsis is cleared.
+            label: String::from("Synopsis"),
+            value: meta::synopsis(&root, &doc),
+            action: InputAction::Synopsis,
+        };
+    }
+
+    fn set_synopsis(&mut self, text: &str) {
+        let Some((root, doc)) = self.meta_target() else {
+            return;
+        };
+        // Committed straight to disk rather than waiting for an idle tick: it's
+        // one short line, and a synopsis the writer typed should survive a crash
+        // in the next second as surely as one they typed an hour ago (R5.6).
+        self.status_msg = Some(match meta::set_synopsis(&root, &doc, text) {
+            Ok(()) if text.trim().is_empty() => String::from("Synopsis cleared"),
+            Ok(()) => String::from("Synopsis saved"),
+            Err(error) => format!("Synopsis not saved: {error}"),
+        });
+        // The binder's secondary line is built from these, so refresh it if open.
+        if let Mode::Binder { selected, .. } = self.mode {
+            self.refresh_binder_with_selection(selected);
+        }
+    }
+
+    /// ^PT: open this document's freeform notes beside it (R5.1, R5.4).
+    ///
+    /// The notes are an ordinary Markdown document, so they arrive with undo,
+    /// search, spellcheck, autosave, and the crash journal already working.
+    fn open_notes(&mut self) {
+        let Some((root, doc)) = self.meta_target() else {
+            return;
+        };
+        // The directory has to exist before the first save of a brand-new notes
+        // file, and opening is the moment the writer commits to having notes.
+        if let Err(error) = std::fs::create_dir_all(&root) {
+            self.status_msg = Some(format!("Cannot create notes directory: {error}"));
+            return;
+        }
+        let notes = meta::notes_path(&root, &doc);
+        self.open_beside(notes);
+    }
+
+    /// Open `path` in the other window, splitting if there is only one.
+    ///
+    /// Never discards unsaved work: if the window being reused is dirty, the
+    /// command refuses and says so rather than replacing the buffer (C3).
+    fn open_beside(&mut self, path: PathBuf) {
+        match Pane::open(Some(path)) {
+            Ok(pane) => {
+                let journal = Journal::new(pane.buf.path.as_deref());
+                let name = pane.buf.file_name();
+                if self.panes.len() < 2 {
+                    self.panes.push(pane);
+                    self.recovery_journals.push(journal);
+                    self.active = self.panes.len() - 1;
+                } else {
+                    let other = 1 - self.active;
+                    if self.panes[other].buf.dirty {
+                        self.status_msg = Some(String::from(
+                            "The other window has unsaved changes (^KS to save it first)",
+                        ));
+                        return;
+                    }
+                    self.panes[other].save_session();
+                    self.panes[other] = pane;
+                    self.recovery_journals[other] = journal;
+                    self.active = other;
+                }
+                let active = self.active;
+                self.doc_stats = DocStats::from_rope(&self.panes[active].buf.rope);
+                self.mode = Mode::Normal;
+                self.status_msg = Some(format!("Opened {name} in the other window"));
+            }
+            Err(error) => self.status_msg = Some(format!("Cannot open: {error}")),
+        }
+    }
+
+    /// ^PM: mark the selected binder document as a note, or back (R5.2).
+    fn toggle_doc_role(&mut self) {
+        let Mode::Binder { selected, .. } = self.mode else {
+            self.status_msg = Some(String::from("Open the binder first (^PB)"));
+            return;
+        };
+        let Some(project) = self.project.as_mut() else {
+            self.status_msg = Some(String::from("No project loaded (^PP to open)"));
+            return;
+        };
+        let Some((role, title)) = project
+            .toggle_role(selected)
+            .zip(project.manifest.docs.get(selected).map(|d| d.title.clone()))
+        else {
+            return;
+        };
+        let saved = project.save();
+        self.status_msg = Some(match saved {
+            Ok(()) => match role {
+                DocRole::Note => format!("\"{title}\" is a note — excluded from compile"),
+                DocRole::Manuscript => format!("\"{title}\" is part of the manuscript again"),
+            },
+            Err(error) => format!("Role changed but the manifest was not saved: {error}"),
+        });
+        self.refresh_binder_with_selection(selected);
+    }
+
+    /// ^PV: open the selected binder document beside the manuscript (R5.4).
+    fn binder_open_split(&mut self) {
+        let Mode::Binder {
+            ref entries,
+            selected,
+        } = self.mode
+        else {
+            self.status_msg = Some(String::from("Open the binder first (^PB)"));
+            return;
+        };
+        let Some(entry) = entries.get(selected) else {
+            return;
+        };
+        if !entry.exists {
+            self.status_msg = Some(format!("File missing: {}", entry.title));
+            return;
+        }
+        let idx = entry.idx;
+        let Some(path) = self
+            .project
+            .as_ref()
+            .and_then(|project| project.manifest.docs.get(idx))
+            .map(|doc| doc.path.clone())
+        else {
+            return;
+        };
+        self.open_beside(path);
     }
 
     // --- snapshots & revisions (R4) ------------------------------------------
@@ -3447,6 +3630,11 @@ fn auto_snapshot(
     let mut store = SnapshotStore::for_file_in(root, source);
     store.capture_auto(rope)?;
     store.prune_auto(keep).map(|_| ())
+}
+
+/// Prompts where an empty answer means something other than "cancel".
+fn allows_empty_answer(action: InputAction) -> bool {
+    matches!(action, InputAction::SnapshotLabel | InputAction::Synopsis)
 }
 
 fn is_word(c: char) -> bool {
