@@ -739,9 +739,18 @@ impl App {
         let entries = keymap::filtered_entries(query);
         let last = entries.len().saturating_sub(1);
         match list_nav_key(&key) {
-            ListNav::Dismiss => { self.mode = Mode::Normal; return; }
-            ListNav::Up => { *selected = selected.saturating_sub(1); return; }
-            ListNav::Down => { *selected = (*selected + 1).min(last); return; }
+            ListNav::Dismiss => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            ListNav::Up => {
+                *selected = selected.saturating_sub(1);
+                return;
+            }
+            ListNav::Down => {
+                *selected = (*selected + 1).min(last);
+                return;
+            }
             ListNav::Other => {}
         }
         match key.code {
@@ -785,9 +794,18 @@ impl App {
             .collect();
         let last = matches.len().saturating_sub(1);
         match list_nav_key(&key) {
-            ListNav::Dismiss => { self.mode = Mode::Normal; return; }
-            ListNav::Up => { *selected = selected.saturating_sub(1); return; }
-            ListNav::Down => { *selected = (*selected + 1).min(last); return; }
+            ListNav::Dismiss => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            ListNav::Up => {
+                *selected = selected.saturating_sub(1);
+                return;
+            }
+            ListNav::Down => {
+                *selected = (*selected + 1).min(last);
+                return;
+            }
             ListNav::Other => {}
         }
         match key.code {
@@ -818,9 +836,18 @@ impl App {
         };
         let last = entries.len().saturating_sub(1);
         match list_nav_key(&key) {
-            ListNav::Dismiss => { self.mode = Mode::Normal; return; }
-            ListNav::Up => { *selected = selected.saturating_sub(1); return; }
-            ListNav::Down => { *selected = (*selected + 1).min(last); return; }
+            ListNav::Dismiss => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            ListNav::Up => {
+                *selected = selected.saturating_sub(1);
+                return;
+            }
+            ListNav::Down => {
+                *selected = (*selected + 1).min(last);
+                return;
+            }
             ListNav::Other => {}
         }
         match key.code {
@@ -2879,7 +2906,10 @@ impl App {
         };
         let last = num_results.saturating_sub(1);
         match list_nav_key(&key) {
-            ListNav::Dismiss => { self.mode = Mode::Normal; return; }
+            ListNav::Dismiss => {
+                self.mode = Mode::Normal;
+                return;
+            }
             ListNav::Up => {
                 if let Mode::ProjectSearch { selected, .. } = &mut self.mode {
                     *selected = selected.saturating_sub(1);
@@ -3139,7 +3169,10 @@ impl App {
         };
         let last = count.saturating_sub(1);
         match list_nav_key(&key) {
-            ListNav::Dismiss => { self.mode = Mode::Normal; return; }
+            ListNav::Dismiss => {
+                self.mode = Mode::Normal;
+                return;
+            }
             ListNav::Up => {
                 if let Mode::Revisions { selected, .. } = &mut self.mode {
                     *selected = selected.saturating_sub(1);

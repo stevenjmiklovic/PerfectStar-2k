@@ -245,6 +245,30 @@ impl Buffer {
         i
     }
 
+    /// The inclusive line range of the paragraph containing `char_idx`.
+    ///
+    /// Distinct from [`para_back`](Self::para_back)/[`para_fwd`](Self::para_fwd),
+    /// which are *movement* commands and deliberately jump to the neighbouring
+    /// paragraph when the cursor already sits on a boundary. This answers
+    /// "which lines am I writing in right now", which is what focus-mode
+    /// dimming needs (R3.4). A cursor on a blank line is its own paragraph.
+    pub fn paragraph_line_range(&self, char_idx: usize) -> (usize, usize) {
+        let line = self.line_of(char_idx);
+        if self.is_blank_line(line) {
+            return (line, line);
+        }
+        let mut first = line;
+        while first > 0 && !self.is_blank_line(first - 1) {
+            first -= 1;
+        }
+        let mut last = line;
+        let final_line = self.len_lines().saturating_sub(1);
+        while last < final_line && !self.is_blank_line(last + 1) {
+            last += 1;
+        }
+        (first, last)
+    }
+
     fn is_blank_line(&self, line: usize) -> bool {
         self.line_text(line).chars().all(|c| c.is_whitespace())
     }
@@ -560,6 +584,34 @@ mod tests {
             dirty: false,
             backed_up: false,
         }
+    }
+
+    #[test]
+    fn paragraph_line_range_covers_the_paragraph_the_cursor_is_in() {
+        // Lines:      0        1       2        3       4       5
+        let b = buf("first\npara\n\nsecond para\n\nthird\n");
+
+        // Middle of the first paragraph reaches both its ends.
+        assert_eq!(b.paragraph_line_range(b.line_start(1)), (0, 1));
+        assert_eq!(b.paragraph_line_range(0), (0, 1));
+        // A blank separator is its own paragraph, so nothing bleeds across it.
+        assert_eq!(b.paragraph_line_range(b.line_start(2)), (2, 2));
+        assert_eq!(b.paragraph_line_range(b.line_start(3)), (3, 3));
+        assert_eq!(b.paragraph_line_range(b.line_start(5)), (5, 5));
+    }
+
+    #[test]
+    fn paragraph_line_range_handles_single_line_and_empty_buffers() {
+        assert_eq!(
+            buf("one paragraph, no newline").paragraph_line_range(0),
+            (0, 0)
+        );
+        assert_eq!(buf("").paragraph_line_range(0), (0, 0));
+        let b = buf("a\nb\nc\n");
+        assert_eq!(b.paragraph_line_range(b.line_start(2)), (0, 2));
+        // Past the trailing newline the cursor is on the empty final line, which
+        // is its own paragraph — there is no prose there to keep lit.
+        assert_eq!(b.paragraph_line_range(b.len_chars()), (3, 3));
     }
 
     #[test]

@@ -1578,7 +1578,9 @@ fn the_sprint_report_survives_the_keystroke_that_ends_the_sprint() {
     // Keep typing: the transient status message goes, the report stays.
     app.handle_key(plain(KeyCode::Char('!')));
     assert!(app.status_msg.is_none());
-    let banner = app.sprint_banner().expect("report should outlive a keystroke");
+    let banner = app
+        .sprint_banner()
+        .expect("report should outlive a keystroke");
     assert!(banner.contains("Sprint done"), "{banner}");
     assert!(banner.contains("2 words"), "{banner}");
 

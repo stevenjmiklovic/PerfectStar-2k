@@ -129,6 +129,10 @@ pub enum Cmd {
     Snapshot,
     /// List this document's snapshots (R4.3).
     RevisionsList,
+    /// Start (or stop) a timed / word-target writing sprint (R3.1).
+    SprintStart,
+    /// Distraction-free view: text only (R3.3).
+    FocusMode,
 }
 
 /// How a command is typed.
@@ -532,6 +536,18 @@ pub const BINDINGS: &[Binding] = &[
         cmd: Cmd::StatsOverlay,
         chord: Pref(O, 'i'),
         name: "writing stats",
+    },
+    // Sprints and focus are screen-and-session concerns, so they sit with the
+    // other ^O toggles next to the session goal (^OG).
+    Binding {
+        cmd: Cmd::SprintStart,
+        chord: Pref(O, 'p'),
+        name: "writing sprint start/stop",
+    },
+    Binding {
+        cmd: Cmd::FocusMode,
+        chord: Pref(O, 'f'),
+        name: "focus mode (text only)",
     },
     // ^P Project prefix
     Binding {

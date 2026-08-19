@@ -261,17 +261,40 @@ Effort key: **S** ≤ half day · **M** ~1–2 days · **L** ~3–5 days.
 
 ## Phase 8 — P1: Sprints & focus (R3)
 
-- [ ] **8.1 Sprint timer.** `SprintStart` (duration and/or word goal),
+- [x] **8.1 Sprint timer.** `SprintStart` (duration and/or word goal),
   unobtrusive countdown, end report appended to `StatsStore`. · Req: R3.1,
   R3.2 · Files: `sprint.rs` (new), `app.rs` · **M**
+  **Notes:** `^OP` starts a sprint (`minutes[/words]`) and stops a running one;
+  either term satisfies it, so hitting the word target early finishes rather
+  than abandons. The report persists as a 10-second banner that survives
+  keystrokes — sprints usually end mid-word, and an ordinary `status_msg` was
+  being wiped by the next letter typed. Sprints are filed in the per-doc history
+  file (`{days, sprints}`, with the pre-sprint bare-map format still readable)
+  and shown in the `^OI` overlay, which now sizes itself to its contents.
+  Stopped sprints report but are not filed.
 
-- [ ] **8.2 Focus mode.** `FocusMode` forces help-level 0, hides chrome;
+- [x] **8.2 Focus mode.** `FocusMode` forces help-level 0, hides chrome;
   optional dim-non-current-paragraph (config `focus_dim`, reuses typewriter
   emphasis); purely presentational, no file effects. · Req: R3.3, R3.4, R3.5 ·
   Files: `sprint.rs`, `ui.rs`, `config.rs` · **M**
+  **Notes:** `^OF` forces help level 0 (which takes the hint bar and prefix
+  menus with it) and blanks the status row unless it has a prompt, a message, or
+  a sprint countdown to show; the row stays reserved so a prompt can't reflow the
+  page mid-sentence. `focus_dim` (default on) dims every line outside the
+  paragraph being written, via a new `Buffer::paragraph_line_range` — the
+  existing `para_back`/`para_fwd` are movement commands and jump to the
+  *neighbouring* paragraph on a boundary. The split-window modeline stays: with
+  two windows it's structure, not chrome.
 
-- [ ] **8.3 Tests.** Sprint report accuracy; focus mode leaves buffer/files
+- [x] **8.3 Tests.** Sprint report accuracy; focus mode leaves buffer/files
   untouched. · **S**
+  **Result:** 32 tests — 11 sprint engine (parse/clock/target/report/chip),
+  9 app-level (prompt, bad spec, expiry, early target, stop, banner survival,
+  focus toggle, R3.5 no-text-effects, sprint-during-focus), 6 stats history
+  (sprint records, capping, legacy-format compat, disk round-trip), 4 render
+  (blank focus status row, countdown in both views, focus dimming on/off,
+  sprint log in the overlay), 2 buffer paragraph-range, 1 config. 230 pass.
+  Plus `tests/harness/smoke_sprint_focus.py` end-to-end in a real terminal.
 
 ---
 

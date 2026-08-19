@@ -21,6 +21,7 @@ mod session;
 mod snapshot;
 mod spellcheck;
 mod splash;
+mod sprint;
 mod stats;
 mod theme;
 mod ui;

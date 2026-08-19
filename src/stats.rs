@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use ropey::Rope;
+use serde::{Deserialize, Serialize};
 
 use crate::normalize;
 
@@ -221,29 +222,73 @@ impl SessionGoal {
 
 // --- Daily history -----------------------------------------------------------
 
-/// Per-day net-words record, keyed by ISO date string (YYYY-MM-DD).
+/// One finished sprint, kept alongside the daily totals (R3.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SprintRecord {
+    /// UTC date the sprint finished on (YYYY-MM-DD).
+    pub date: String,
+    /// Net prose words written during the sprint.
+    pub words: i64,
+    pub seconds: u64,
+    /// Whether the sprint met its own terms.
+    pub met_target: bool,
+}
+
+/// How many sprint records a document's history keeps. A writer's recent
+/// sprints are useful; their thousandth-from-last is not, and the file stays
+/// small enough to rewrite atomically on every save.
+const MAX_SPRINTS: usize = 100;
+
+/// On-disk shape of a document's history.
+///
+/// `deny_unknown_fields` is load-bearing: without it, the original bare
+/// `{"2026-08-19": 812}` map would parse "successfully" as a record with no
+/// days at all, and a writer's history would silently vanish on first save.
+/// Failing to parse is what routes legacy files to the fallback below.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoryFile {
+    #[serde(default)]
+    days: BTreeMap<String, i64>,
+    #[serde(default)]
+    sprints: Vec<SprintRecord>,
+}
+
+/// Per-day net-words record, keyed by ISO date string (YYYY-MM-DD), plus the
+/// document's sprint log.
 #[derive(Debug, Clone, Default)]
 pub struct DailyHistory {
     pub entries: BTreeMap<String, i64>,
+    pub sprints: Vec<SprintRecord>,
     path: Option<PathBuf>,
 }
 
 impl DailyHistory {
     /// Load history for a given file from the stats directory.
     pub fn load(file_path: Option<&Path>) -> Self {
-        let path = match (crate::paths::stats(), file_path) {
+        Self::load_in(crate::paths::stats(), file_path)
+    }
+
+    /// Load history from an explicit stats root, keyed by the document's path.
+    /// Production passes [`crate::paths::stats`]; tests pass a temporary root.
+    pub fn load_in(root: Option<PathBuf>, file_path: Option<&Path>) -> Self {
+        let path = match (root, file_path) {
             (Some(dir), Some(fp)) => {
                 let key = crate::paths::path_key(fp);
                 Some(dir.join(format!("{key}.json")))
             }
             _ => None,
         };
-        let entries = path
+        let file = path
             .as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str(&s).ok())
+            .map(|data| parse_history(&data))
             .unwrap_or_default();
-        DailyHistory { entries, path }
+        DailyHistory {
+            entries: file.days,
+            sprints: file.sprints,
+            path,
+        }
     }
 
     /// Record a net-word delta for today.
@@ -256,6 +301,24 @@ impl DailyHistory {
         *entry += delta;
     }
 
+    /// Record a finished sprint (R3.2), keeping the most recent
+    /// [`MAX_SPRINTS`].
+    pub fn record_sprint(&mut self, words: i64, seconds: u64, met_target: bool) {
+        self.sprints.push(SprintRecord {
+            date: today_key(),
+            words,
+            seconds,
+            met_target,
+        });
+        let excess = self.sprints.len().saturating_sub(MAX_SPRINTS);
+        self.sprints.drain(..excess);
+    }
+
+    /// The last N sprints, most recent first.
+    pub fn recent_sprints(&self, n: usize) -> Vec<&SprintRecord> {
+        self.sprints.iter().rev().take(n).collect()
+    }
+
     /// Persist history to disk.
     pub fn save(&self) -> io::Result<()> {
         let Some(ref path) = self.path else {
@@ -264,8 +327,11 @@ impl DailyHistory {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(&self.entries)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let file = HistoryFile {
+            days: self.entries.clone(),
+            sprints: self.sprints.clone(),
+        };
+        let json = serde_json::to_string_pretty(&file).map_err(io::Error::other)?;
         crate::paths::write_atomic(path, json.as_bytes())
     }
 
@@ -288,6 +354,22 @@ impl DailyHistory {
             .map(|(k, &v)| (k.as_str(), v))
             .collect()
     }
+}
+
+/// Read a history file in either the current shape or the pre-sprint one (a
+/// bare `{date: words}` map). An unreadable file yields an empty history rather
+/// than an error: losing a statistic is not worth refusing to open a document.
+fn parse_history(data: &str) -> HistoryFile {
+    if let Ok(file) = serde_json::from_str::<HistoryFile>(data) {
+        return file;
+    }
+    if let Ok(days) = serde_json::from_str::<BTreeMap<String, i64>>(data) {
+        return HistoryFile {
+            days,
+            sprints: Vec::new(),
+        };
+    }
+    HistoryFile::default()
 }
 
 fn today_key() -> String {
@@ -393,6 +475,82 @@ mod tests {
         h.record_delta(50);
         h.record_delta(30);
         assert_eq!(h.today(), 80);
+    }
+
+    #[test]
+    fn sprint_records_accumulate_newest_last_and_are_capped() {
+        let mut h = DailyHistory::default();
+        h.record_sprint(300, 900, true);
+        h.record_sprint(120, 600, false);
+
+        assert_eq!(h.sprints.len(), 2);
+        assert_eq!(h.recent_sprints(1)[0].words, 120);
+        assert_eq!(h.recent_sprints(5).len(), 2);
+        assert!(h.sprints[0].met_target && !h.sprints[1].met_target);
+        assert_eq!(h.sprints[0].date, today_key());
+
+        for i in 0..MAX_SPRINTS {
+            h.record_sprint(i as i64, 60, true);
+        }
+        assert_eq!(h.sprints.len(), MAX_SPRINTS, "oldest records retire");
+        assert_eq!(
+            h.sprints.last().unwrap().words,
+            MAX_SPRINTS as i64 - 1,
+            "the newest is kept"
+        );
+    }
+
+    #[test]
+    fn history_survives_a_save_and_reload_on_disk() {
+        let dir = std::env::temp_dir().join(format!("pstar-stats-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let doc = dir.join("chapter.md");
+
+        let mut history = DailyHistory::load_in(Some(dir.clone()), Some(&doc));
+        history.record_delta(812);
+        history.record_sprint(520, 754, true);
+        history.save().unwrap();
+
+        let reloaded = DailyHistory::load_in(Some(dir.clone()), Some(&doc));
+        assert_eq!(reloaded.today(), 812);
+        assert_eq!(reloaded.sprints.len(), 1);
+        assert_eq!(reloaded.recent_sprints(1)[0].words, 520);
+        assert_eq!(reloaded.recent_sprints(1)[0].seconds, 754);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn history_round_trips_days_and_sprints_through_the_file_shape() {
+        let mut h = DailyHistory::default();
+        h.record_delta(812);
+        h.record_sprint(520, 754, true);
+        let file = HistoryFile {
+            days: h.entries.clone(),
+            sprints: h.sprints.clone(),
+        };
+
+        let json = serde_json::to_string(&file).unwrap();
+        let parsed = parse_history(&json);
+        assert_eq!(parsed.days, h.entries);
+        assert_eq!(parsed.sprints, h.sprints);
+    }
+
+    #[test]
+    fn a_pre_sprint_history_file_still_loads_its_days() {
+        // The original format was a bare {date: words} map. Reading it as the
+        // current shape must not silently produce an empty history.
+        let parsed = parse_history("{\"2026-08-19\": 812, \"2026-08-18\": -40}");
+        assert_eq!(parsed.days.get("2026-08-19"), Some(&812));
+        assert_eq!(parsed.days.get("2026-08-18"), Some(&-40));
+        assert!(parsed.sprints.is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_history_file_is_empty_not_fatal() {
+        let parsed = parse_history("{ not json at all");
+        assert!(parsed.days.is_empty());
+        assert!(parsed.sprints.is_empty());
     }
 
     #[test]

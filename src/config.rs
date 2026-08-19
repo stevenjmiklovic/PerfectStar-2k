@@ -38,6 +38,9 @@ pub struct Config {
     /// Keep the current line pinned at a fixed row and scroll the document
     /// under it, instead of only scrolling once the cursor hits the edge.
     pub typewriter: bool,
+    /// In focus mode, dim everything outside the paragraph being written
+    /// (R3.4). Set false to keep the whole page evenly lit.
+    pub focus_dim: bool,
     /// Body font for `^KM` manuscript RTF export: "times" or "courier".
     pub manuscript_font: String,
 }
@@ -56,6 +59,7 @@ impl Default for Config {
             help_level: 1,
             spellcheck: true,
             typewriter: false,
+            focus_dim: true,
             manuscript_font: String::from("times"),
         }
     }
@@ -122,6 +126,14 @@ mod tests {
 
         assert_eq!(config.snapshot_keep, 20);
         assert_eq!(config.autosnapshot_secs, 0);
+    }
+
+    #[test]
+    fn focus_dim_defaults_on_and_can_be_turned_off() {
+        // R3.4: dimming is optional and SHALL be configurable off.
+        assert!(Config::default().focus_dim);
+        let config: Config = toml::from_str("focus_dim = false\n").unwrap();
+        assert!(!config.focus_dim);
     }
 
     #[test]

@@ -3,6 +3,7 @@ use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use std::time::Instant;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -263,12 +264,19 @@ fn draw_text(frame: &mut Frame, app: &App, pane_idx: usize, area: Rect) {
     let last = pane.buf.len_lines();
     let mut lines: Vec<Line> = Vec::with_capacity(height);
 
+    // Focus dimming (R3.4): in focus mode, everything outside the paragraph
+    // being written recedes. Only the focused window dims — the other one has
+    // no cursor to be writing at.
+    let lit_range = (app.focus.is_some() && app.focus_dim && is_active)
+        .then(|| pane.buf.paragraph_line_range(pane.cursor));
+
     match app.wrap_width_of(pane) {
         Some(width) => {
             let mut doc_line = pane.top_line;
             while lines.len() < height && doc_line < last {
-                let (text, styles) =
+                let (text, mut styles) =
                     line_styles(app, pane, doc_line, query.as_deref(), block_range);
+                dim_unless_lit(app, &mut styles, doc_line, lit_range);
                 for (s, e) in wrap_segments(&text, width) {
                     if lines.len() >= height {
                         break;
@@ -285,8 +293,9 @@ fn draw_text(frame: &mut Frame, app: &App, pane_idx: usize, area: Rect) {
                 if doc_line >= last {
                     break;
                 }
-                let (text, styles) =
+                let (text, mut styles) =
                     line_styles(app, pane, doc_line, query.as_deref(), block_range);
+                dim_unless_lit(app, &mut styles, doc_line, lit_range);
                 lines.push(styled_clip(
                     &text,
                     &styles,
@@ -300,6 +309,22 @@ fn draw_text(frame: &mut Frame, app: &App, pane_idx: usize, area: Rect) {
         lines.push(Line::default());
     }
     frame.render_widget(Paragraph::new(lines).style(app.theme.base), area);
+}
+
+/// Push a whole line into the background when focus mode is dimming and the
+/// line falls outside the lit paragraph (R3.4).
+///
+/// Applied *after* `line_styles`, replacing rather than layering: the point is
+/// that the surrounding page recedes, so Markdown emphasis and spelling marks
+/// go quiet with it.
+fn dim_unless_lit(app: &App, styles: &mut [Style], doc_line: usize, lit: Option<(usize, usize)>) {
+    let Some((first, last)) = lit else { return };
+    if doc_line >= first && doc_line <= last {
+        return;
+    }
+    for style in styles.iter_mut() {
+        *style = app.theme.dim;
+    }
 }
 
 /// The line's text plus one resolved style per char (markdown, then search
@@ -555,7 +580,10 @@ fn status_left(app: &App) -> String {
             Some(msg) => format!(" {msg}"),
             None => String::from(" ↑↓ scroll · ^R restore the older version · Esc close"),
         },
-        Mode::Normal => match &app.status_msg {
+        // A finished sprint's report outlives the keystroke that would clear an
+        // ordinary status message, because a sprint usually ends mid-word
+        // (R3.2).
+        Mode::Normal => match app.status_msg.as_deref().or_else(|| app.sprint_banner()) {
             Some(msg) => format!(" {msg}"),
             None => {
                 let dirty = if app.buf.dirty { " •" } else { "" };
@@ -565,7 +593,50 @@ fn status_left(app: &App) -> String {
     }
 }
 
+/// The sprint countdown, sized to stay in the corner of the eye (R3.1).
+fn sprint_chip(app: &App) -> Option<String> {
+    app.sprint
+        .as_ref()
+        .map(|sprint| sprint.chip(Instant::now(), app.doc_stats.words))
+}
+
+/// Focus mode's status row (R3.3): blank unless there is something the writer
+/// asked for — a prompt, a message, or a running sprint's countdown.
+///
+/// The row stays reserved rather than reclaimed for text, so a prompt appearing
+/// mid-sentence doesn't reflow the page under the cursor.
+fn draw_focus_status(frame: &mut Frame, app: &App, area: Rect) {
+    let left = match &app.mode {
+        Mode::Normal => match app.status_msg.as_deref().or_else(|| app.sprint_banner()) {
+            Some(msg) => format!(" {msg}"),
+            None => String::new(),
+        },
+        _ => status_left(app),
+    };
+    let right = match sprint_chip(app) {
+        Some(chip) => format!("{chip} "),
+        None => String::new(),
+    };
+
+    let width = area.width as usize;
+    let pad = width
+        .saturating_sub(UnicodeWidthStr::width(left.as_str()))
+        .saturating_sub(UnicodeWidthStr::width(right.as_str()));
+    let content = format!("{left}{}{right}", " ".repeat(pad));
+    // Styled as the page, not as a status bar: no band of colour across the
+    // bottom of an otherwise clean screen.
+    frame.render_widget(
+        Paragraph::new(Line::from(content)).style(app.theme.base),
+        area,
+    );
+}
+
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
+    if app.focus.is_some() {
+        draw_focus_status(frame, app, area);
+        return;
+    }
+
     let line_no = app.buf.line_of(app.cursor) + 1;
     let col_no = app.buf.visual_col(app.cursor) + 1;
 
@@ -605,8 +676,14 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         String::new()
     };
 
+    // Sprint countdown first: it's the one thing a sprinting writer glances at.
+    let sprint_part = match sprint_chip(app) {
+        Some(chip) => format!("{chip}  "),
+        None => String::new(),
+    };
+
     let right = format!(
-        "{rec}{pending}Ln {line_no}  Col {col_no}{words_part}{sel_part}{goal_part}  {ins} "
+        "{rec}{pending}{sprint_part}Ln {line_no}  Col {col_no}{words_part}{sel_part}{goal_part}  {ins} "
     );
 
     let width = area.width as usize;
@@ -909,14 +986,6 @@ fn draw_binder(frame: &mut Frame, app: &App, text_area: Rect) {
 
 /// The writing statistics overlay (^OI): daily history and current counts.
 fn draw_stats_overlay(frame: &mut Frame, app: &App, area: Rect) {
-    let width = 40u16.min(area.width.saturating_sub(4));
-    let height = 14u16.min(area.height.saturating_sub(2));
-    let x = (area.width.saturating_sub(width)) / 2 + area.x;
-    let y = (area.height.saturating_sub(height)) / 2 + area.y;
-    let overlay = Rect::new(x, y, width, height);
-
-    frame.render_widget(Clear, overlay);
-
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(format!(
         " Words: {}  Chars: {}",
@@ -945,6 +1014,32 @@ fn draw_stats_overlay(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(format!("   {date}: {words:+}")));
     }
 
+    // Recent sprints (R3.2 files them here; R2.5 requires the history be
+    // viewable, and this overlay is where a writer looks).
+    let sprints = app.daily_history.recent_sprints(3);
+    if !sprints.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(" Recent sprints:"));
+        for record in sprints {
+            let mark = if record.met_target { " ✓" } else { "" };
+            lines.push(Line::from(format!(
+                "   {}: {} words in {}{mark}",
+                record.date,
+                record.words,
+                crate::sprint::format_duration(std::time::Duration::from_secs(record.seconds)),
+            )));
+        }
+    }
+
+    // Sized to its contents, so the sprint log can't be silently clipped off
+    // the bottom on a short terminal.
+    let width = 44u16.min(area.width.saturating_sub(4));
+    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let x = (area.width.saturating_sub(width)) / 2 + area.x;
+    let y = (area.height.saturating_sub(height)) / 2 + area.y;
+    let overlay = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, overlay);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1142,6 +1237,7 @@ mod tests {
     use crate::snapshot::SnapshotEntry;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
 
     /// Render one frame and return the screen as text lines. Exercises the real
     /// draw path, so a width/unicode mistake in an overlay fails here instead of
@@ -1258,6 +1354,125 @@ mod tests {
         assert!(screen.contains("line 40"), "{screen}");
         assert!(!screen.contains("line 39"), "scrolled past: {screen}");
         assert!(screen.contains("/80"), "{screen}");
+    }
+
+    /// Render a frame and return each cell's colours for one row. Colours, not
+    /// whole `Style`s: rendering fills in fields (underline colour) that a theme
+    /// style leaves unset, so comparing styles wholesale compares noise.
+    fn row_colors(app: &mut App, row: u16) -> Vec<(Color, Color)> {
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.width)
+            .map(|x| {
+                let style = buffer[(x, row)].style();
+                (
+                    style.fg.unwrap_or(Color::Reset),
+                    style.bg.unwrap_or(Color::Reset),
+                )
+            })
+            .collect()
+    }
+
+    fn colors_of(style: Style) -> (Color, Color) {
+        (
+            style.fg.unwrap_or(Color::Reset),
+            style.bg.unwrap_or(Color::Reset),
+        )
+    }
+
+    fn app_with(text: &str) -> App {
+        let mut app = App::new(None).unwrap();
+        app.splash = false;
+        app.buf.insert(0, text);
+        app
+    }
+
+    /// Put the app in focus mode. The command path itself is covered by the
+    /// app-level tests; these tests are about what the frame looks like.
+    fn enter_focus(app: &mut App) {
+        app.focus = Some(crate::sprint::Focus::enter(app.help_level));
+        app.help_level = 0;
+    }
+
+    #[test]
+    fn focus_mode_leaves_the_status_row_blank_until_it_has_something_to_say() {
+        let mut app = app_with("a line of prose\n");
+        enter_focus(&mut app);
+
+        let lines = screen(&mut app);
+        let status = lines.last().unwrap();
+        assert!(status.trim().is_empty(), "focus status row: {status:?}");
+        // The chrome the normal status line carries is gone.
+        assert!(!lines.join("\n").contains("Ln 1"), "{lines:#?}");
+
+        // A message still reaches the writer.
+        app.status_msg = Some(String::from("Saved chapter.md"));
+        let status = screen(&mut app).last().unwrap().clone();
+        assert!(status.contains("Saved chapter.md"), "{status:?}");
+    }
+
+    #[test]
+    fn a_running_sprint_shows_its_countdown_in_both_views() {
+        let mut app = app_with("prose\n");
+        app.sprint = Some(
+            crate::sprint::Sprint::parse("25/500", app.doc_stats.words, Instant::now()).unwrap(),
+        );
+
+        // Normal view: the chip sits with the rest of the status readouts.
+        let status = screen(&mut app).last().unwrap().clone();
+        assert!(status.contains('⏱'), "{status:?}");
+        assert!(status.contains("0/500"), "{status:?}");
+        assert!(
+            status.contains("Ln 1"),
+            "still the full status line: {status:?}"
+        );
+
+        // Focus view: the countdown is the *only* thing on the row.
+        enter_focus(&mut app);
+        let status = screen(&mut app).last().unwrap().clone();
+        assert!(status.contains('⏱'), "{status:?}");
+        assert!(!status.contains("Ln 1"), "{status:?}");
+    }
+
+    #[test]
+    fn focus_dim_dims_only_the_lines_outside_the_current_paragraph() {
+        // Cursor starts at 0, so the first paragraph is the lit one.
+        let mut app = app_with("first para line\n\nsecond para\n");
+        app.cursor = 0;
+        enter_focus(&mut app);
+        assert!(app.focus_dim, "dimming is on by default (R3.4)");
+
+        let dim = colors_of(app.theme.dim);
+        assert_ne!(
+            row_colors(&mut app, 0)[0],
+            dim,
+            "the paragraph being written stays lit"
+        );
+        assert_eq!(row_colors(&mut app, 2)[0], dim, "other paragraphs recede");
+
+        // Turning it off leaves the page evenly lit (R3.4: configurable off).
+        app.focus_dim = false;
+        assert_ne!(row_colors(&mut app, 2)[0], dim);
+    }
+
+    #[test]
+    fn the_stats_overlay_lists_recent_sprints() {
+        // R3.2 files sprints in the history; R2.5 requires that history be
+        // viewable, and ^OI is where a writer looks for it.
+        let mut app = app_with("prose\n");
+        app.daily_history.record_sprint(520, 754, true);
+        app.daily_history.record_sprint(90, 300, false);
+        app.mode = Mode::Stats;
+
+        let screen = screen(&mut app).join("\n");
+        assert!(screen.contains("Recent sprints"), "{screen}");
+        assert!(screen.contains("520 words in 12:34 ✓"), "{screen}");
+        assert!(screen.contains("90 words in 5:00"), "{screen}");
+        assert!(
+            !screen.contains("90 words in 5:00 ✓"),
+            "unmet target: {screen}"
+        );
     }
 
     #[test]

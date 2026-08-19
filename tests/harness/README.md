@@ -21,16 +21,22 @@ python3 -m venv .harness-venv
 | `gen_manuscript.py` | Deterministic large-manuscript generator. Default 300k words → `tests/fixtures/manuscript-300k.md` (git-ignored; regenerate on demand). |
 | `bench_latency.py` | Opens the fixture, types a burst, measures per-keystroke round-trip latency against a budget. Exits non-zero on regression. |
 | `smoke_snapshots.py` | End-to-end walk of the R4 snapshot flow: `^KN` label → revise → `^KO` list → Enter diff → `^R` restore → `^U` undo. Exits non-zero on any failed screen check. |
+| `smoke_sprint_focus.py` | End-to-end walk of R3: `^OF` focus mode on/off (chrome actually leaves and returns) and a word-target sprint (`^OP`) driven to completion by typing. |
 
-## Running the snapshot smoke test
+## Running the smoke tests
 
 ```sh
 .harness-venv/bin/python tests/harness/smoke_snapshots.py
+.harness-venv/bin/python tests/harness/smoke_sprint_focus.py
 ```
 
-Snapshots are written under the platform metadata root, which macOS does not let
-a test redirect, so the script records the snapshot directories present before
-the run and deletes only the ones it created.
+Both write under the platform metadata root (snapshots, stats), which macOS does
+not let a test redirect, so each script records what was there before the run and
+deletes only what it created.
+
+Assert with `wait_for`, not a bare screen read after `send`: the app needs a turn
+of its event loop to process keys and redraw. Note also that `display()` returns a
+*list of rows* — use `text()` for substring checks.
 
 ## Running the latency bench
 
