@@ -55,6 +55,10 @@ pub struct Theme {
     /// (a misspelled word inside **bold** still looks bold) rather than
     /// replacing it.
     pub misspelled: Style,
+    /// Annotated span (R9.2). Like `misspelled`, it leaves `bg` unset and is
+    /// applied with `Style::patch` so a comment on **bold** text still reads as
+    /// bold — the prose flow is never altered, only marked.
+    pub annotated: Style,
     /// Added line in the revision diff view (R4.4). A full-row band rather than
     /// a coloured foreground, so add/remove reads at a glance on the overlay's
     /// own background.
@@ -80,6 +84,9 @@ impl Theme {
             highlight: Style::new().fg(dos::BLACK).bg(dos::YELLOW),
             misspelled: Style::new()
                 .fg(dos::LIGHT_RED)
+                .add_modifier(Modifier::UNDERLINED),
+            annotated: Style::new()
+                .fg(dos::LIGHT_MAGENTA)
                 .add_modifier(Modifier::UNDERLINED),
             diff_added: Style::new().fg(dos::BLACK).bg(dos::LIGHT_GREEN),
             diff_removed: Style::new().fg(dos::BLACK).bg(dos::LIGHT_RED),
@@ -111,6 +118,9 @@ impl Theme {
             misspelled: Style::new()
                 .fg(Color::Red)
                 .add_modifier(Modifier::UNDERLINED),
+            annotated: Style::new()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::UNDERLINED),
             diff_added: Style::new().fg(Color::Black).bg(Color::Green),
             diff_removed: Style::new().fg(Color::Black).bg(Color::Red),
             md_marker: Style::new().fg(Color::DarkGray).bg(Color::Black),
@@ -140,6 +150,9 @@ impl Theme {
             highlight: Style::new().fg(Color::Black).bg(Color::Yellow),
             misspelled: Style::new()
                 .fg(Color::Red)
+                .add_modifier(Modifier::UNDERLINED),
+            annotated: Style::new()
+                .fg(Color::Magenta)
                 .add_modifier(Modifier::UNDERLINED),
             // REVERSED turns the foreground into the band, matching how this
             // theme draws every other highlight without naming a background.

@@ -142,6 +142,15 @@ pub enum Cmd {
     ToggleDocRole,
     /// Open the selected binder document in a split (R5.4).
     BinderOpenSplit,
+    /// Editorial annotations (R9)
+    /// Comment on the marked block, or at the cursor (R9.1).
+    Annotate,
+    /// List every comment in the document (R9.4).
+    AnnotationList,
+    /// Go to the next comment (R9.4).
+    NextAnnotation,
+    /// Go to the previous comment (R9.4).
+    PrevAnnotation,
 }
 
 /// How a command is typed.
@@ -639,6 +648,27 @@ pub const BINDINGS: &[Binding] = &[
         cmd: Cmd::BinderOpenSplit,
         chord: Pref(P, 'v'),
         name: "binder: open document in a split",
+    },
+    // Annotations: Comment, List, Go to next, go Up to previous.
+    Binding {
+        cmd: Cmd::Annotate,
+        chord: Pref(P, 'c'),
+        name: "comment on block or cursor",
+    },
+    Binding {
+        cmd: Cmd::AnnotationList,
+        chord: Pref(P, 'l'),
+        name: "list comments",
+    },
+    Binding {
+        cmd: Cmd::NextAnnotation,
+        chord: Pref(P, 'g'),
+        name: "next comment",
+    },
+    Binding {
+        cmd: Cmd::PrevAnnotation,
+        chord: Pref(P, 'u'),
+        name: "previous comment",
     },
 ];
 

@@ -139,6 +139,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if matches!(app.mode, Mode::Diff { .. }) {
         draw_diff(frame, app, text_area);
     }
+    if matches!(app.mode, Mode::Annotations { .. }) {
+        draw_annotations(frame, app, text_area);
+    }
     let active_slot = pane_ids.iter().position(|&p| p == app.active).unwrap_or(0);
     place_cursor(frame, app, pane_areas[active_slot]);
 }
@@ -361,6 +364,20 @@ fn line_styles(
                 for st in styles.iter_mut().take(e.min(n_chars)).skip(s) {
                     *st = st.patch(app.theme.misspelled);
                 }
+            }
+        }
+    }
+
+    // Editorial comments mark their span without changing the prose (R9.2).
+    for annotation in &pane.annotations {
+        if annotation.orphaned || annotation.len == 0 {
+            continue;
+        }
+        if annotation.end() > line_start && annotation.anchor < line_start + n_chars {
+            let from = annotation.anchor.saturating_sub(line_start).min(n_chars);
+            let to = annotation.end().saturating_sub(line_start).min(n_chars);
+            for st in styles.iter_mut().take(to).skip(from) {
+                *st = st.patch(app.theme.annotated);
             }
         }
     }
@@ -588,12 +605,24 @@ fn status_left(app: &App) -> String {
         // A finished sprint's report outlives the keystroke that would clear an
         // ordinary status message, because a sprint usually ends mid-word
         // (R3.2).
+        Mode::Annotations { entries, .. } => match &app.status_msg {
+            Some(msg) => format!(" {msg}"),
+            None => format!(
+                " {} comment(s) · ↑↓ select · Enter go to it · Esc close",
+                entries.len()
+            ),
+        },
         Mode::Normal => match app.status_msg.as_deref().or_else(|| app.sprint_banner()) {
             Some(msg) => format!(" {msg}"),
-            None => {
-                let dirty = if app.buf.dirty { " •" } else { "" };
-                format!(" {}{}", app.buf.file_name(), dirty)
-            }
+            // With no message to show, a comment under the cursor is what the
+            // writer most wants there (R9.2's dimmed panel, without new chrome).
+            None => match app.annotation_under_cursor() {
+                Some(text) => format!(" ✎ {text}"),
+                None => {
+                    let dirty = if app.buf.dirty { " •" } else { "" };
+                    format!(" {}{}", app.buf.file_name(), dirty)
+                }
+            },
         },
     }
 }
@@ -1035,6 +1064,66 @@ fn draw_binder(frame: &mut Frame, app: &App, text_area: Rect) {
             Block::new()
                 .borders(Borders::ALL)
                 .title(title)
+                .style(app.theme.status),
+        ),
+        area,
+    );
+}
+
+/// Every comment in the document (^PL, R9.4).
+fn draw_annotations(frame: &mut Frame, app: &App, text_area: Rect) {
+    let Mode::Annotations { entries, selected } = &app.mode else {
+        return;
+    };
+
+    let width = (text_area.width.saturating_sub(4)).clamp(40, 72);
+    let max_list = (text_area.height as usize).saturating_sub(4).clamp(3, 16);
+    let height = (entries.len().clamp(1, max_list) + 2) as u16;
+    let area = Rect {
+        x: text_area.x + (text_area.width.saturating_sub(width)) / 2,
+        y: text_area.y + 1,
+        width,
+        height: height.min(text_area.height),
+    };
+
+    let visible = (area.height as usize).saturating_sub(2);
+    let first = selected.saturating_sub(visible.saturating_sub(1));
+    let inner = area.width.saturating_sub(2) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (i, annotation) in entries.iter().enumerate().skip(first).take(visible) {
+        // An orphan says so rather than pointing at a line it no longer marks.
+        let place = if annotation.orphaned {
+            String::from("orphaned")
+        } else {
+            format!(
+                "Ln {}",
+                app.buf.line_of(annotation.anchor.min(app.buf.len_chars())) + 1
+            )
+        };
+        let room = inner.saturating_sub(place.len() + 4);
+        let mut text: String = annotation.text.chars().take(room).collect();
+        if annotation.text.chars().count() > room {
+            text.push('…');
+        }
+        let row = format!(" {place:>10}  {text}");
+        let style = if i == *selected {
+            app.theme.block
+        } else if annotation.orphaned {
+            app.theme.dim
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(row, style)));
+    }
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).style(app.theme.status).block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(" Comments ")
                 .style(app.theme.status),
         ),
         area,
@@ -1590,6 +1679,57 @@ mod tests {
         let rows = screen(&mut app);
         assert!(rows.iter().all(|row| row.chars().count() == 80));
         assert!(rows.join("\n").contains('…'), "clipped with an ellipsis");
+    }
+
+    #[test]
+    fn an_annotated_span_is_marked_without_changing_the_prose() {
+        let mut app = app_with("The knife was on the table.\n");
+        app.annotations = vec![crate::meta::Annotation::new(
+            4,
+            5,
+            String::from("whose knife?"),
+        )];
+
+        let rows = screen(&mut app);
+        // R9.2: the text is untouched — only its styling says a comment is here.
+        assert!(
+            rows[0].starts_with("The knife was on the table."),
+            "{:?}",
+            rows[0]
+        );
+        let marked = app.theme.annotated.fg.expect("the marker sets a colour");
+        let colors = row_colors(&mut app, 0);
+        assert_eq!(colors[4].0, marked, "the anchored word is marked");
+        assert_ne!(colors[0].0, marked, "the rest of the line is not");
+
+        // The comment itself surfaces where the cursor is, without new chrome.
+        app.cursor = 6;
+        let status = screen(&mut app).last().unwrap().clone();
+        assert!(status.contains("whose knife?"), "{status:?}");
+    }
+
+    #[test]
+    fn the_comment_list_shows_lines_and_flags_orphans() {
+        let mut app = app_with("one\ntwo\nthree\n");
+        let mut orphan =
+            crate::meta::Annotation::new(0, 0, String::from("was about the cut scene"));
+        orphan.orphaned = true;
+        app.mode = Mode::Annotations {
+            entries: vec![
+                crate::meta::Annotation::new(4, 3, String::from("about two")),
+                orphan,
+            ],
+            selected: 0,
+        };
+
+        let screen = screen(&mut app).join("\n");
+        assert!(screen.contains("Comments"), "{screen}");
+        assert!(
+            screen.contains("Ln 2") && screen.contains("about two"),
+            "{screen}"
+        );
+        assert!(screen.contains("orphaned"), "{screen}");
+        assert!(screen.contains("was about the cut scene"), "{screen}");
     }
 
     #[test]

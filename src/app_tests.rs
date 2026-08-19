@@ -1865,3 +1865,293 @@ fn binder_rows_carry_each_documents_synopsis() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// --- Phase 10: editorial annotations (R9) -----------------------------------
+
+fn comment_text(app: &App, i: usize) -> &str {
+    app.annotations[i].text.as_str()
+}
+
+#[test]
+fn a_comment_attaches_to_the_marked_block_and_persists() {
+    let (dir, source, mut app) = notes_app("annotate-block", "The knife was on the table.\n");
+    let root = app.meta_root.clone().unwrap();
+
+    // Mark "knife" (chars 4..9) and comment on it.
+    app.blocks.begin = Some(4);
+    app.blocks.end = Some(9);
+    app.execute(Cmd::Annotate);
+    match &app.mode {
+        Mode::Input {
+            label,
+            value,
+            action,
+        } => {
+            assert_eq!(*action, InputAction::AnnotationText);
+            assert!(label.contains("marked block"), "{label}");
+            assert_eq!(value, "");
+        }
+        _ => panic!("^PC should prompt for the comment"),
+    }
+    typed(&mut app, "whose knife?");
+    app.handle_key(plain(KeyCode::Enter));
+
+    assert_eq!(app.annotations.len(), 1);
+    assert_eq!((app.annotations[0].anchor, app.annotations[0].len), (4, 5));
+    assert_eq!(comment_text(&app, 0), "whose knife?");
+    // Written to the sidecar, beside the synopsis rather than in the manuscript.
+    assert_eq!(
+        crate::meta::annotations(&root, &source)[0].text,
+        "whose knife?"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&source).unwrap(),
+        "The knife was on the table.\n",
+        "R9.1: the comment never touches the prose"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_comment_without_a_block_attaches_to_the_cursor() {
+    let (dir, _source, mut app) = notes_app("annotate-point", "some prose here\n");
+    app.set_cursor(5);
+
+    app.execute(Cmd::Annotate);
+    typed(&mut app, "check this");
+    app.handle_key(plain(KeyCode::Enter));
+
+    assert_eq!((app.annotations[0].anchor, app.annotations[0].len), (5, 0));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_comment_under_the_cursor_is_shown_and_editable_in_place() {
+    let (dir, _source, mut app) = notes_app("annotate-edit", "The knife was on the table.\n");
+    app.blocks.begin = Some(4);
+    app.blocks.end = Some(9);
+    app.execute(Cmd::Annotate);
+    typed(&mut app, "whose knife?");
+    app.handle_key(plain(KeyCode::Enter));
+
+    // Inside the span, ^PC edits that comment rather than adding another.
+    app.set_cursor(6);
+    assert_eq!(app.annotation_under_cursor(), Some("whose knife?"));
+    app.execute(Cmd::Annotate);
+    match &app.mode {
+        Mode::Input { value, label, .. } => {
+            assert_eq!(value, "whose knife?", "pre-filled for editing");
+            assert!(label.contains("delete"), "{label}");
+        }
+        _ => panic!("expected the comment prompt"),
+    }
+    typed(&mut app, " (Marcus's)");
+    app.handle_key(plain(KeyCode::Enter));
+    assert_eq!(app.annotations.len(), 1, "edited, not duplicated");
+    assert_eq!(comment_text(&app, 0), "whose knife? (Marcus's)");
+
+    // Emptying it is the one way to delete a comment.
+    app.execute(Cmd::Annotate);
+    for _ in 0..comment_text(&app, 0).len() {
+        app.handle_key(plain(KeyCode::Backspace));
+    }
+    app.handle_key(plain(KeyCode::Enter));
+    assert!(app.annotations.is_empty());
+    assert!(app.status_msg.as_ref().unwrap().contains("deleted"));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn comment_anchors_follow_the_text_through_real_edits() {
+    // R9.5: the same adjustment that keeps blocks and bookmarks attached.
+    let (dir, _source, mut app) = notes_app("annotate-adjust", "The knife was on the table.\n");
+    app.blocks.begin = Some(4);
+    app.blocks.end = Some(9);
+    app.execute(Cmd::Annotate);
+    typed(&mut app, "whose knife?");
+    app.handle_key(plain(KeyCode::Enter));
+    app.blocks = Default::default();
+
+    // Insert ahead of the anchored word.
+    app.set_cursor(0);
+    app.insert_text("Yesterday: ", EditKind::Other);
+    assert_eq!((app.annotations[0].anchor, app.annotations[0].len), (15, 5));
+    let text = app.buf.rope.to_string();
+    assert_eq!(&text[15..20], "knife", "still on the word it was about");
+
+    // Delete behind it.
+    app.delete_range(0, 11, false);
+    assert_eq!((app.annotations[0].anchor, app.annotations[0].len), (4, 5));
+
+    // An edit elsewhere leaves it alone, and a bookmark on the same spot agrees.
+    app.bookmarks[0] = Some(4);
+    app.set_cursor(app.buf.len_chars());
+    app.insert_text("\nA new line.\n", EditKind::Other);
+    assert_eq!(app.annotations[0].anchor, 4);
+    assert_eq!(app.bookmarks[0], Some(4), "annotations move like marks do");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn deleting_the_annotated_text_orphans_the_comment_and_keeps_it() {
+    // R9.6/C3.
+    let (dir, source, mut app) = notes_app("annotate-orphan", "The knife was on the table.\n");
+    let root = app.meta_root.clone().unwrap();
+    app.blocks.begin = Some(4);
+    app.blocks.end = Some(9);
+    app.execute(Cmd::Annotate);
+    typed(&mut app, "whose knife?");
+    app.handle_key(plain(KeyCode::Enter));
+    app.blocks = Default::default();
+
+    app.delete_range(0, app.buf.len_chars(), false);
+
+    assert_eq!(app.annotations.len(), 1, "the comment survives its text");
+    assert!(app.annotations[0].orphaned);
+    assert_eq!(comment_text(&app, 0), "whose knife?");
+    assert_eq!(app.annotation_under_cursor(), None, "nothing to point at");
+
+    // And the orphan is written back, so it's still there tomorrow.
+    app.execute(Cmd::Save);
+    let stored = crate::meta::annotations(&root, &source);
+    assert_eq!(stored.len(), 1);
+    assert!(stored[0].orphaned);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn comments_come_back_when_the_document_is_reopened() {
+    let (dir, source, mut app) = notes_app("annotate-reload", "The knife was on the table.\n");
+    let root = app.meta_root.clone().unwrap();
+    crate::meta::set_annotations(
+        &root,
+        &source,
+        &[crate::meta::Annotation::new(
+            4,
+            5,
+            String::from("whose knife?"),
+        )],
+    )
+    .unwrap();
+
+    // Opening the document into a pane loads its comments.
+    let mut reopened = App::new(Some(source.clone())).unwrap();
+    reopened.splash = false;
+    reopened.meta_root = Some(root.clone());
+    reopened.load_annotations(0);
+
+    assert_eq!(reopened.annotations.len(), 1);
+    reopened.set_cursor(6);
+    assert_eq!(reopened.annotation_under_cursor(), Some("whose knife?"));
+
+    // ...and a pane that adopts a *different* document doesn't inherit them.
+    let other = dir.join("other.md");
+    std::fs::write(&other, "unrelated\n").unwrap();
+    reopened.switch_active_pane(other).unwrap();
+    assert!(
+        reopened.annotations.is_empty(),
+        "comments belong to their document"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = app.flush_annotations();
+}
+
+#[test]
+fn navigation_walks_comments_and_the_list_jumps_to_them() {
+    let (dir, source, mut app) = notes_app("annotate-nav", "one two three four five six\n");
+    let root = app.meta_root.clone().unwrap();
+    crate::meta::set_annotations(
+        &root,
+        &source,
+        &[
+            crate::meta::Annotation::new(4, 3, String::from("about two")),
+            crate::meta::Annotation::new(14, 4, String::from("about four")),
+            {
+                let mut orphan = crate::meta::Annotation::new(26, 0, String::from("gone"));
+                orphan.orphaned = true;
+                orphan
+            },
+        ],
+    )
+    .unwrap();
+    app.load_annotations(0);
+
+    app.set_cursor(0);
+    app.execute(Cmd::NextAnnotation);
+    assert_eq!(app.cursor, 4);
+    app.execute(Cmd::NextAnnotation);
+    assert_eq!(app.cursor, 14);
+    app.execute(Cmd::NextAnnotation);
+    assert_eq!(app.cursor, 14, "orphans have nowhere to jump to");
+    assert!(app.status_msg.as_ref().unwrap().contains("No further"));
+    app.execute(Cmd::PrevAnnotation);
+    assert_eq!(app.cursor, 4);
+
+    // The list shows all three, orphans last, and Enter goes to one.
+    app.execute(Cmd::AnnotationList);
+    match &app.mode {
+        Mode::Annotations { entries, .. } => {
+            assert_eq!(entries.len(), 3);
+            assert!(entries[2].orphaned, "orphans sort to the end");
+        }
+        _ => panic!("^PL should open the comment list"),
+    }
+    app.handle_key(plain(KeyCode::Down));
+    app.handle_key(plain(KeyCode::Enter));
+    assert!(matches!(app.mode, Mode::Normal));
+    assert_eq!(app.cursor, 14);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn comments_never_reach_an_export() {
+    // R9.3. They can't: the text lives in the sidecar, not the document. This
+    // guards that no future path smuggles it into the compiled prose.
+    let (dir, source, mut app) = notes_app("annotate-export", "The knife was on the table.\n");
+    let root = app.meta_root.clone().unwrap();
+    crate::meta::set_annotations(
+        &root,
+        &source,
+        &[crate::meta::Annotation::new(
+            4,
+            5,
+            String::from("CUT THIS SCENE"),
+        )],
+    )
+    .unwrap();
+    app.load_annotations(0);
+
+    for (cmd, name) in [
+        (Cmd::ExportClean, "clean.txt"),
+        (Cmd::ExportManuscript, "ms.rtf"),
+        (Cmd::ExportHtml, "book.html"),
+        (Cmd::ExportDocx, "book.docx"),
+        (Cmd::ExportEpub, "book.epub"),
+    ] {
+        let out = dir.join(name);
+        app.execute(cmd);
+        typed(&mut app, out.to_str().unwrap());
+        app.handle_key(plain(KeyCode::Enter));
+
+        let bytes = std::fs::read(&out).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(
+            !bytes.windows(14).any(|w| w == b"CUT THIS SCENE"),
+            "{name} leaked an editorial comment"
+        );
+        // Sanity: the prose itself did make it out (except into zip containers,
+        // where it is compressed away from a naive search).
+        if !name.ends_with("docx") && !name.ends_with("epub") {
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(text.contains("knife"), "{name} lost the prose");
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -347,20 +347,30 @@ Effort key: **S** ≤ half day · **M** ~1–2 days · **L** ~3–5 days.
 
 *Extends `meta.rs`; depends on Phase 9.*
 
-- [ ] **10.1 [gate] Annotation model + anchor adjustment.** `Annotation { anchor,
+- [x] **10.1 [gate] Annotation model + anchor adjustment.** `Annotation { anchor,
   len, text, orphaned }`; run anchors through the existing `adjust_pos`
   machinery on every position-shifting edit; orphan (never drop) on deletion.
   · Req: R9.1, R9.5, R9.6 · Design §4.9 · Files: `meta.rs`, `app.rs` · **L**
 
-- [ ] **10.2 Render + navigate + list.** Dimmed margin markers/panel (like `..`
+- [x] **10.2 Render + navigate + list.** Dimmed margin markers/panel (like `..`
   notes); `NextAnnotation/PrevAnnotation`; annotation-list overlay. · Req:
   R9.2, R9.4 · Files: `ui.rs`, `app.rs`, `keymap.rs` · **M**
 
-- [ ] **10.3 Exclude from exports.** Ensure `CompiledDoc` strip step drops
+- [x] **10.3 Exclude from exports.** Ensure `CompiledDoc` strip step drops
   annotations. · Req: R9.3 · Files: `export/mod.rs`, `normalize.rs` · **S**
 
-- [ ] **10.4 Tests.** Anchor survives edits; deletion orphans not loses;
+- [x] **10.4 Tests.** Anchor survives edits; deletion orphans not loses;
   excluded from every export. · **M**
+  **Result:** 22 tests — 10 anchor-adjustment unit tests (before/after/inside,
+  partial deletion, full deletion orphans, orphans stop moving, point
+  annotations, span coverage), 1 sidecar round-trip, 8 app-level (block and
+  point anchoring, in-place edit, delete-by-emptying, anchors through real
+  edits compared against a bookmark on the same spot, orphan persistence,
+  reload, navigation + list), 2 render, plus one test that exports all five
+  formats and greps each for the comment text. 269 pass.
+  **Note on 10.3:** no code change was needed. Annotation text lives in the
+  sidecar and never enters the buffer, so every exporter excludes it by
+  construction; the export test is there to keep that true.
 
 ---
 

@@ -100,6 +100,8 @@ pub enum InputAction {
     /// A document's one-line synopsis (^PI, R5.1). Like a snapshot label, an
     /// empty answer is meaningful: it clears the synopsis.
     Synopsis,
+    /// An editorial comment's text (^PC, R9.1). Empty deletes the comment.
+    AnnotationText,
     /// Optional label for a snapshot taken with ^KN (R4.1). Unlike every other
     /// prompt, an empty answer is meaningful: take the snapshot unlabelled.
     SnapshotLabel,
@@ -152,6 +154,11 @@ pub enum Mode {
         /// A version marked with Space, to compare against instead of the
         /// current draft (R4.4: "two snapshots, or a snapshot and current").
         compare: Option<usize>,
+    },
+    /// Every editorial comment in the document (R9.4).
+    Annotations {
+        entries: Vec<meta::Annotation>,
+        selected: usize,
     },
     /// A rendered comparison between two versions (R4.4, task 7.4).
     Diff {
@@ -374,6 +381,7 @@ impl App {
             focus: None,
             focus_dim: config.focus_dim,
         };
+        app.load_annotations(0);
         app.offer_recovery_for_active();
         Ok(app)
     }
@@ -412,6 +420,7 @@ impl App {
             }
         }
         self.clear_clean_recovery();
+        let _ = self.flush_annotations();
         // Persist daily words-written delta before exiting (R2.5).
         let delta = self.doc_stats.words as i64 - self.session_start_words as i64;
         self.daily_history.record_delta(delta);
@@ -510,6 +519,12 @@ impl App {
             self.status_msg = Some(warnings.join("; "));
         } else if autosaved {
             self.status_msg = Some(String::from("Autosaved"));
+        }
+
+        // Annotation anchors that moved while typing (R9.5) are written back on
+        // the same idle tick as the recovery journal.
+        if let Some(warning) = self.flush_annotations() {
+            self.status_msg = Some(warning);
         }
 
         // Debounced full recount to correct any drift (R2.7).
@@ -706,6 +721,7 @@ impl App {
             Mode::Stats => self.mode = Mode::Normal,
             Mode::ProjectSearch { .. } => self.handle_project_search_key(key),
             Mode::Revisions { .. } => self.handle_revisions_key(key),
+            Mode::Annotations { .. } => self.handle_annotations_key(key),
             Mode::Diff { .. } => self.handle_diff_key(key),
             Mode::Normal => self.handle_normal_key(key),
         }
@@ -1328,6 +1344,10 @@ impl App {
             Cmd::OpenNotes => self.open_notes(),
             Cmd::ToggleDocRole => self.toggle_doc_role(),
             Cmd::BinderOpenSplit => self.binder_open_split(),
+            Cmd::Annotate => self.prompt_annotation(),
+            Cmd::AnnotationList => self.open_annotation_list(),
+            Cmd::NextAnnotation => self.jump_annotation(true),
+            Cmd::PrevAnnotation => self.jump_annotation(false),
         }
         if !matches!(cmd, Cmd::Undo) && !is_edit_cmd(cmd) {
             self.history.break_group();
@@ -1360,6 +1380,8 @@ impl App {
                 self.recovery_journals[self.active] = journal;
                 self.doc_stats =
                     crate::stats::DocStats::from_rope(&self.panes[self.active].buf.rope);
+                let active = self.active;
+                self.load_annotations(active);
                 Ok(())
             }
             Err(e) => Err(format!("{e}")),
@@ -1656,6 +1678,15 @@ impl App {
         }
         for p in self.jump_stack.iter_mut() {
             *p = adjust_pos(*p, at, del_chars, ins);
+        }
+        // Editorial comments travel with the text they're about (R9.5), through
+        // the same adjustment as the marks above; a comment whose text is gone
+        // is orphaned, never dropped (R9.6).
+        if !self.annotations.is_empty() {
+            for annotation in self.annotations.iter_mut() {
+                annotation.adjust(at, del_chars, ins);
+            }
+            self.annotations_dirty = true;
         }
         self.last_edit = Instant::now();
 
@@ -2028,6 +2059,7 @@ impl App {
                         self.take_snapshot(label);
                     }
                     InputAction::Synopsis => self.set_synopsis(&path),
+                    InputAction::AnnotationText => self.set_annotation(&path),
                     InputAction::SprintSpec => {
                         let now = Instant::now();
                         match Sprint::parse(&path, self.doc_stats.words, now) {
@@ -2449,6 +2481,10 @@ impl App {
         if let Err(error) = self.recovery_journals[self.active].clear() {
             warnings.push(format!("recovery cleanup failed: {error}"));
         }
+        // Anchors that moved with this document's text belong on disk with it.
+        if let Some(warning) = self.flush_annotations() {
+            warnings.push(warning);
+        }
         // Save As may have changed the buffer path, so future dirty edits need
         // a journal keyed to the newly adopted destination.
         self.recovery_journals[self.active] = Journal::new(source.as_deref());
@@ -2502,6 +2538,8 @@ impl App {
                 self.panes.push(pane);
                 self.recovery_journals.push(journal);
                 self.active = self.panes.len() - 1;
+                let active = self.active;
+                self.load_annotations(active);
             }
             Err(e) => self.status_msg = Some(format!("Open failed: {e}")),
         }
@@ -3114,6 +3152,222 @@ impl App {
         self.status_msg = Some(format!("{count} replacement(s) made"));
     }
 
+    // --- editorial annotations (R9) -------------------------------------------
+
+    /// Load a pane's annotations from its sidecar.
+    ///
+    /// Called wherever a pane adopts a document, so a window can never be left
+    /// showing the comment set of the file that used to be in it.
+    fn load_annotations(&mut self, index: usize) {
+        let loaded = match (&self.meta_root, self.panes[index].buf.path.as_deref()) {
+            (Some(root), Some(doc)) => meta::annotations(root, doc),
+            _ => Vec::new(),
+        };
+        self.panes[index].annotations = loaded;
+        self.panes[index].annotations_dirty = false;
+    }
+
+    /// Write back any pane whose annotations have moved, returning the first
+    /// failure as a warning string.
+    fn flush_annotations(&mut self) -> Option<String> {
+        let root = self.meta_root.clone()?;
+        let mut warning = None;
+        for pane in self.panes.iter_mut() {
+            if !pane.annotations_dirty {
+                continue;
+            }
+            let Some(doc) = pane.buf.path.clone() else {
+                continue;
+            };
+            match meta::set_annotations(&root, &doc, &pane.annotations) {
+                Ok(()) => pane.annotations_dirty = false,
+                Err(error) => {
+                    warning.get_or_insert(format!("Annotations not saved: {error}"));
+                }
+            }
+        }
+        warning
+    }
+
+    /// The text of the comment the cursor is inside, for the status line (R9.2).
+    pub fn annotation_under_cursor(&self) -> Option<&str> {
+        self.annotation_at_cursor()
+            .and_then(|i| self.annotations.get(i))
+            .map(|annotation| annotation.text.as_str())
+    }
+
+    /// The annotation the cursor is inside, if any.
+    fn annotation_at_cursor(&self) -> Option<usize> {
+        let cursor = self.cursor;
+        self.annotations
+            .iter()
+            .position(|annotation| annotation.covers(cursor))
+    }
+
+    /// ^PC: comment on the marked block, or on the cursor position (R9.1).
+    ///
+    /// With the cursor already inside a comment, this edits that one instead —
+    /// the same chord reads as "the comment here".
+    fn prompt_annotation(&mut self) {
+        if self.meta_target().is_none() {
+            return;
+        }
+        let existing = self
+            .annotation_at_cursor()
+            .and_then(|i| self.annotations.get(i))
+            .map(|annotation| annotation.text.clone());
+        let label = match (&existing, self.blocks.range()) {
+            (Some(_), _) => String::from("Comment (empty to delete)"),
+            (None, Some(_)) => String::from("Comment on the marked block"),
+            (None, None) => String::from("Comment here"),
+        };
+        self.mode = Mode::Input {
+            label,
+            value: existing.unwrap_or_default(),
+            action: InputAction::AnnotationText,
+        };
+    }
+
+    fn set_annotation(&mut self, text: &str) {
+        let Some((root, doc)) = self.meta_target() else {
+            return;
+        };
+        let text = text.trim().to_string();
+        let existing = self.annotation_at_cursor();
+
+        let message = match (existing, text.is_empty()) {
+            // Emptying an existing comment deletes it — the one deliberate way
+            // to remove one, since nothing else ever discards a comment (R9.6).
+            (Some(i), true) => {
+                self.annotations.remove(i);
+                String::from("Comment deleted")
+            }
+            (Some(i), false) => {
+                self.annotations[i].text = text;
+                self.annotations[i].orphaned = false;
+                String::from("Comment updated")
+            }
+            (None, true) => String::from("Comment discarded"),
+            (None, false) => {
+                // A marked block anchors the comment to that span; otherwise it
+                // attaches to the cursor position.
+                let (anchor, len) = match self.blocks.range() {
+                    Some((begin, end)) => (begin, end - begin),
+                    None => (self.cursor, 0),
+                };
+                self.annotations
+                    .push(meta::Annotation::new(anchor, len, text));
+                self.annotations
+                    .sort_by_key(|annotation| (annotation.anchor, annotation.len));
+                String::from("Comment added")
+            }
+        };
+        let active = self.active;
+        self.panes[active].annotations_dirty = true;
+        let _ = (root, doc); // the write goes through flush_annotations
+        self.status_msg = Some(match self.flush_annotations() {
+            Some(warning) => format!("{message}, but {warning}"),
+            None => message,
+        });
+    }
+
+    /// ^PG / ^PU: jump to the next or previous comment (R9.4).
+    ///
+    /// Orphaned comments are skipped here — they have no text to jump to — and
+    /// are reachable from the list instead.
+    fn jump_annotation(&mut self, forward: bool) {
+        if self.annotations.is_empty() {
+            self.status_msg = Some(String::from(
+                "No comments in this document (^PC to add one)",
+            ));
+            return;
+        }
+        let cursor = self.cursor;
+        let mut live: Vec<usize> = self
+            .annotations
+            .iter()
+            .filter(|annotation| !annotation.orphaned)
+            .map(|annotation| annotation.anchor)
+            .collect();
+        live.sort_unstable();
+        let target = if forward {
+            live.iter().find(|&&anchor| anchor > cursor).copied()
+        } else {
+            live.iter().rev().find(|&&anchor| anchor < cursor).copied()
+        };
+        match target {
+            Some(anchor) => self.long_jump(anchor.min(self.buf.len_chars())),
+            None if live.is_empty() => {
+                self.status_msg =
+                    Some(String::from("Every comment here is orphaned (^PL to list)"));
+            }
+            None => {
+                self.status_msg = Some(String::from(if forward {
+                    "No further comments"
+                } else {
+                    "No earlier comments"
+                }));
+            }
+        }
+    }
+
+    /// ^PL: every comment in the document, orphans included (R9.4).
+    fn open_annotation_list(&mut self) {
+        if matches!(self.mode, Mode::Annotations { .. }) {
+            self.mode = Mode::Normal;
+            return;
+        }
+        if self.annotations.is_empty() {
+            self.status_msg = Some(String::from(
+                "No comments in this document (^PC to add one)",
+            ));
+            return;
+        }
+        let mut entries = self.annotations.clone();
+        entries.sort_by_key(|annotation| (annotation.orphaned, annotation.anchor));
+        self.mode = Mode::Annotations {
+            entries,
+            selected: 0,
+        };
+    }
+
+    fn handle_annotations_key(&mut self, key: KeyEvent) {
+        let (count, selected) = match &self.mode {
+            Mode::Annotations { entries, selected } => (entries.len(), *selected),
+            _ => return,
+        };
+        let last = count.saturating_sub(1);
+        match list_nav_key(&key) {
+            ListNav::Dismiss => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            ListNav::Up => {
+                if let Mode::Annotations { selected, .. } = &mut self.mode {
+                    *selected = selected.saturating_sub(1);
+                }
+                return;
+            }
+            ListNav::Down => {
+                if let Mode::Annotations { selected, .. } = &mut self.mode {
+                    *selected = (*selected + 1).min(last);
+                }
+                return;
+            }
+            ListNav::Other => {}
+        }
+        if key.code == KeyCode::Enter {
+            let anchor = match &self.mode {
+                Mode::Annotations { entries, .. } => entries.get(selected).map(|a| a.anchor),
+                _ => None,
+            };
+            if let Some(anchor) = anchor {
+                self.mode = Mode::Normal;
+                self.long_jump(anchor.min(self.buf.len_chars()));
+            }
+        }
+    }
+
     // --- notes & research sidecar (R5) ---------------------------------------
 
     /// The sidecar root and the active document's path, or `None` with a status
@@ -3211,6 +3465,7 @@ impl App {
                 }
                 let active = self.active;
                 self.doc_stats = DocStats::from_rope(&self.panes[active].buf.rope);
+                self.load_annotations(active);
                 self.mode = Mode::Normal;
                 self.status_msg = Some(format!("Opened {name} in the other window"));
             }
@@ -3634,7 +3889,10 @@ fn auto_snapshot(
 
 /// Prompts where an empty answer means something other than "cancel".
 fn allows_empty_answer(action: InputAction) -> bool {
-    matches!(action, InputAction::SnapshotLabel | InputAction::Synopsis)
+    matches!(
+        action,
+        InputAction::SnapshotLabel | InputAction::Synopsis | InputAction::AnnotationText
+    )
 }
 
 fn is_word(c: char) -> bool {
