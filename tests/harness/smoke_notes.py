@@ -9,9 +9,10 @@ line and a document can be marked as a note (^PM).
 This also exercises the ^P prefix dispatch for the new letters, which the unit
 tests bypass by calling the commands directly.
 
-Sidecars land under the platform metadata root, which is not redirectable on
-macOS, so the script records what was there before and removes only what it
-created.
+macOS gives no way to redirect the metadata root, so this writes into the real
+one. `MetadataGuard` removes whatever the run created across every metadata
+subdirectory — saving a file touches more of them than a test means to, since it
+also triggers the rolling backup, the auto-snapshot, and the session record.
 
 Usage: .harness-venv/bin/python tests/harness/smoke_notes.py
 """
@@ -23,23 +24,15 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from pty_harness import PtyHarness  # noqa: E402
+from pty_harness import MetadataGuard, PtyHarness  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BINARY = ROOT / "target" / "debug" / "pstar"
 
 
-def meta_root():
-    """The same directory `paths::meta()` resolves to."""
-    if sys.platform == "darwin":
-        return pathlib.Path.home() / "Library/Application Support/perfectstar2k/meta"
-    return pathlib.Path.home() / ".local/state/perfectstar2k/meta"
-
 
 def main():
     subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
-    root = meta_root()
-    before = set(root.iterdir()) if root.exists() else set()
 
     workdir = pathlib.Path(tempfile.mkdtemp(prefix="pstar-smoke-"))
     chapter = workdir / "chapter1.md"
@@ -59,7 +52,7 @@ def main():
             )
 
     try:
-        with PtyHarness([str(BINARY), str(chapter)]) as pty:
+        with MetadataGuard(), PtyHarness([str(BINARY), str(chapter)]) as pty:
             pty.send_raw(b" ")  # dismiss the splash
             pty.wait_for("chapter1.md", timeout=10)
 
@@ -134,12 +127,6 @@ def main():
             pty.send("y")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
-        if root.exists():
-            for created in set(root.iterdir()) - before:
-                if created.is_file():
-                    created.unlink()
-                else:
-                    shutil.rmtree(created, ignore_errors=True)
 
     if failures:
         print("\n\n".join(failures))

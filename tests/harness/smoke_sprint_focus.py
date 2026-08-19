@@ -5,9 +5,10 @@ Drives the real binary in a PTY: toggle focus mode (^OF) and check the chrome
 actually leaves and comes back, then run a word-target sprint (^OP) to
 completion by typing and check it reports.
 
-A finished sprint appends to the document's stats file under the platform
-metadata root, which is not redirectable on macOS, so this script records the
-stats files present before the run and removes only the ones it created.
+macOS gives no way to redirect the metadata root, so this writes into the real
+one. `MetadataGuard` removes whatever the run created across every metadata
+subdirectory — saving a file touches more of them than a test means to, since it
+also triggers the rolling backup, the auto-snapshot, and the session record.
 
 Usage: .harness-venv/bin/python tests/harness/smoke_sprint_focus.py
 """
@@ -19,23 +20,15 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from pty_harness import PtyHarness  # noqa: E402
+from pty_harness import MetadataGuard, PtyHarness  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BINARY = ROOT / "target" / "debug" / "pstar"
 
 
-def stats_root():
-    """The same directory `paths::stats()` resolves to."""
-    if sys.platform == "darwin":
-        return pathlib.Path.home() / "Library/Application Support/perfectstar2k/stats"
-    return pathlib.Path.home() / ".local/state/perfectstar2k/stats"
-
 
 def main():
     subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
-    root = stats_root()
-    before = set(root.iterdir()) if root.exists() else set()
 
     workdir = pathlib.Path(tempfile.mkdtemp(prefix="pstar-smoke-"))
     chapter = workdir / "chapter.md"
@@ -49,7 +42,7 @@ def main():
             )
 
     try:
-        with PtyHarness([str(BINARY), str(chapter)]) as pty:
+        with MetadataGuard(), PtyHarness([str(BINARY), str(chapter)]) as pty:
             pty.send_raw(b" ")  # dismiss the splash
             pty.wait_for("chapter.md", timeout=10)
             check("Ln 1" in pty.text(), "status line missing before focus mode", pty)
@@ -106,11 +99,6 @@ def main():
             pty.send("y")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
-        if root.exists():
-            for created in set(root.iterdir()) - before:
-                created.unlink() if created.is_file() else shutil.rmtree(
-                    created, ignore_errors=True
-                )
 
     if failures:
         print("\n\n".join(failures))

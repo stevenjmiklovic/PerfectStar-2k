@@ -5,9 +5,10 @@ Drives the real binary in a PTY: take a labelled snapshot (^KN), revise the
 document, list revisions (^KO), open the diff (Enter), restore (^R), and undo
 (^U). Asserts on the emulated screen at each step.
 
-Snapshots land under the platform metadata root, which is not redirectable on
-macOS, so this script records the snapshot directories that exist before the
-run and removes only the ones it created.
+macOS gives no way to redirect the metadata root, so this writes into the real
+one. `MetadataGuard` removes whatever the run created across every metadata
+subdirectory — saving a file touches more of them than a test means to, since it
+also triggers the rolling backup, the auto-snapshot, and the session record.
 
 Usage: .harness-venv/bin/python tests/harness/smoke_snapshots.py
 """
@@ -19,24 +20,15 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from pty_harness import PtyHarness  # noqa: E402
+from pty_harness import MetadataGuard, PtyHarness  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BINARY = ROOT / "target" / "debug" / "pstar"
 
 
-def snapshot_root():
-    """The same directory `paths::snapshots()` resolves to."""
-    if sys.platform == "darwin":
-        return pathlib.Path.home() / "Library/Application Support/perfectstar2k/snapshots"
-    state = pathlib.Path.home() / ".local/state/perfectstar2k/snapshots"
-    return state
-
 
 def main():
     subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
-    root = snapshot_root()
-    before = set(root.iterdir()) if root.exists() else set()
 
     workdir = pathlib.Path(tempfile.mkdtemp(prefix="pstar-smoke-"))
     chapter = workdir / "chapter.md"
@@ -53,7 +45,7 @@ def main():
         return needle in pty.text()
 
     try:
-        with PtyHarness([str(BINARY), str(chapter)]) as pty:
+        with MetadataGuard(), PtyHarness([str(BINARY), str(chapter)]) as pty:
             # The splash swallows the first keystroke; dismiss it, then wait for
             # the editor proper.
             pty.send_raw(b" ")
@@ -126,9 +118,6 @@ def main():
             pty.send("y")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
-        if root.exists():
-            for created in set(root.iterdir()) - before:
-                shutil.rmtree(created, ignore_errors=True)
 
     if failures:
         print("\n\n".join(failures))

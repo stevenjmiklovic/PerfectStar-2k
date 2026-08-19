@@ -26,10 +26,13 @@ a venv at `.harness-venv/`.
 import codecs
 import fcntl
 import os
+import pathlib
 import pty
 import select
+import shutil
 import signal
 import struct
+import sys
 import termios
 import threading
 import time
@@ -39,6 +42,57 @@ import pyte
 # Device Attributes (DA1) reply: "VT100 with Advanced Video Option". Sent in
 # answer to the app's startup capability probe so it doesn't wait out a timeout.
 DA1_REPLY = b"\x1b[?1;2c"
+
+
+# Everything `pstar` persists about a document, per paths.rs. A smoke test that
+# saves a file touches more of these than it means to — saving triggers the
+# rolling backup, the auto-snapshot, and the session record — so cleanup has to
+# cover the whole tree rather than the one subdir a test thinks it is using.
+METADATA_SUBDIRS = ("sessions", "projects", "snapshots", "meta", "recovery", "stats")
+
+
+def metadata_root():
+    """The directory `paths::meta_root()` resolves to on this platform."""
+    if sys.platform == "darwin":
+        return pathlib.Path.home() / "Library/Application Support/perfectstar2k"
+    state = os.environ.get("XDG_STATE_HOME")
+    base = pathlib.Path(state) if state else pathlib.Path.home() / ".local/state"
+    return base / "perfectstar2k"
+
+
+class MetadataGuard:
+    """Remove metadata a smoke test created, and only what it created.
+
+    macOS gives no way to redirect the metadata root, so a PTY test writes into
+    the writer's real one. This records what was there on entry and deletes the
+    difference on exit — never anything that predates the run.
+
+    Usage:
+        with MetadataGuard():
+            ...drive the app...
+    """
+
+    def __init__(self):
+        self.root = metadata_root()
+        self.before = {}
+
+    def __enter__(self):
+        for name in METADATA_SUBDIRS:
+            directory = self.root / name
+            self.before[name] = set(directory.iterdir()) if directory.exists() else set()
+        return self
+
+    def __exit__(self, *exc):
+        for name in METADATA_SUBDIRS:
+            directory = self.root / name
+            if not directory.exists():
+                continue
+            for created in set(directory.iterdir()) - self.before[name]:
+                if created.is_dir():
+                    shutil.rmtree(created, ignore_errors=True)
+                else:
+                    created.unlink(missing_ok=True)
+        return False
 
 
 class PtyHarness:

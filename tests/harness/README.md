@@ -30,6 +30,8 @@ python3 -m venv .harness-venv
 ```sh
 .harness-venv/bin/python tests/harness/smoke_snapshots.py
 .harness-venv/bin/python tests/harness/smoke_sprint_focus.py
+.harness-venv/bin/python tests/harness/smoke_notes.py
+.harness-venv/bin/python tests/harness/smoke_style.py
 ```
 
 Both write under the platform metadata root (snapshots, stats), which macOS does
