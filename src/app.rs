@@ -6,6 +6,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use ratatui::DefaultTerminal;
 use ropey::Rope;
 
+use crate::autocorrect::Autocorrect;
 use crate::block::adjust_pos;
 use crate::buffer::wrap_segments;
 use crate::config::Config;
@@ -14,7 +15,6 @@ use crate::export::docx::DocxExporter;
 use crate::export::epub::EpubExporter;
 use crate::export::html::{HtmlExporter, PlainTextExporter};
 use crate::export::{self, CompiledDoc, Exporter};
-use crate::autocorrect::Autocorrect;
 use crate::history::{Edit, EditGroup, EditKind};
 use crate::keymap::{self, Cmd, Prefix};
 use crate::killring::{KillRing, PutCycle};
@@ -56,6 +56,11 @@ const GOAL_BANNER: Duration = Duration::from_secs(5);
 /// (R2.1: at least 3 seconds). The writer glances at the number and returns to
 /// typing without the count becoming permanent chrome.
 const COUNT_FLASH: Duration = Duration::from_secs(3);
+
+/// How long a first-use hint stays on screen (R12.3: 4 seconds, or until the
+/// next keypress). Like the other banners it is time-bounded chrome that never
+/// requires dismissal; unlike them it fires at most once per capability.
+const FIRST_USE_HINT: Duration = Duration::from_secs(4);
 
 /// Result of a shared list-navigation key check. Panels call `list_nav_key`
 /// before their own match arms so Up/Down/^E/^X/Esc are handled uniformly.
@@ -365,6 +370,16 @@ pub struct App {
     /// Whether smart typographic substitution runs as the writer types (R10.6),
     /// independent of `autocorrect`.
     pub smart_typography: bool,
+    /// The current first-use hint and when it landed (R12.3). Kept in its own
+    /// banner rather than `status_msg` for the same reason as the goal/sprint
+    /// banners: `status_msg` is cleared by the very keystroke that would show
+    /// it. This survives the invoking keystroke and auto-dismisses after
+    /// [`FIRST_USE_HINT`] or on the next keypress, whichever comes first.
+    first_use_hint: Option<(String, Instant)>,
+    /// Capabilities whose one-line hint has already been shown, so it never
+    /// reappears (R12.3). Small and append-only; membership is checked once per
+    /// command invocation, off the typing hot path.
+    hinted_cmds: Vec<Cmd>,
 }
 
 /// `App` dereferences to the active pane, so the whole editing engine —
@@ -504,6 +519,8 @@ impl App {
             lookup,
             autocorrect,
             smart_typography,
+            first_use_hint: None,
+            hinted_cmds: Vec::new(),
         };
         app.load_annotations(0);
         app.offer_recovery_for_active();
@@ -807,6 +824,42 @@ impl App {
             .map(|(message, _)| message.as_str())
     }
 
+    /// The current first-use hint, while it is still fresh (R12.3). Times out
+    /// after [`FIRST_USE_HINT`]; the next keypress clears it outright (see
+    /// [`handle_key`]).
+    pub fn first_use_hint(&self) -> Option<&str> {
+        self.first_use_hint
+            .as_ref()
+            .filter(|(_, shown)| shown.elapsed() < FIRST_USE_HINT)
+            .map(|(message, _)| message.as_str())
+    }
+
+    /// Set a first-use hint banner directly, for render tests that exercise the
+    /// status-area presentation without driving the whole invoke path.
+    #[cfg(test)]
+    pub fn set_first_use_hint_for_test(&mut self, msg: &str) {
+        self.first_use_hint = Some((msg.to_string(), Instant::now()));
+    }
+
+    /// If `cmd` names a capability that carries a first-use hint, and its hint
+    /// has not been shown before, surface a one-line nudge (R12.3). Suppressed
+    /// entirely while `help_level` is 0 (R12.4) — but the command is still
+    /// recorded as "hinted" so raising the level later never fires a stale
+    /// first-use hint for a capability the writer has already used.
+    fn maybe_first_use_hint(&mut self, cmd: Cmd) {
+        if self.hinted_cmds.contains(&cmd) {
+            return;
+        }
+        let Some(hint) = first_use_hint(cmd) else {
+            return;
+        };
+        self.hinted_cmds.push(cmd);
+        if self.help_level == 0 {
+            return;
+        }
+        self.first_use_hint = Some((hint.to_string(), Instant::now()));
+    }
+
     /// Whether the word/character counts should render this frame (R2.1): either
     /// the always-on display is enabled, or an on-demand reveal is still within
     /// its at-least-3-second window.
@@ -919,6 +972,10 @@ impl App {
             return;
         }
         self.status_msg = None;
+        // R12.3: a first-use hint auto-dismisses on any keypress. Clearing it
+        // here (before dispatch) means a hint set by *this* keystroke's command
+        // survives, while one left over from a previous keystroke is gone.
+        self.first_use_hint = None;
 
         if self.recording && !self.playing {
             self.macro_keys.push(key);
@@ -1375,7 +1432,16 @@ impl App {
         }
     }
 
+    /// Run a command, then surface its first-use hint if it has one (R12.3).
+    /// The hint fires *after* dispatch so a command that posts its own status
+    /// message has already done so; the hint lives in its own banner and does
+    /// not clobber that message.
     fn execute(&mut self, cmd: Cmd) {
+        self.dispatch(cmd);
+        self.maybe_first_use_hint(cmd);
+    }
+
+    fn dispatch(&mut self, cmd: Cmd) {
         if cmd != Cmd::Undo {
             self.history.break_chain();
         }
@@ -2761,7 +2827,10 @@ impl App {
                 .into_iter()
                 .map(|(t, dep)| format!("{} (needs {dep})", t.label()))
                 .collect();
-            self.status_msg = Some(format!("No export formats available: {}", missing.join(", ")));
+            self.status_msg = Some(format!(
+                "No export formats available: {}",
+                missing.join(", ")
+            ));
             return;
         }
         // If any format was omitted for a missing dependency, say so up front so
@@ -2825,25 +2894,27 @@ impl App {
     fn route_export_target(&mut self, target: export::Target) {
         let has_project = self.project.is_some();
         let (label, action) = match target {
-            export::Target::PlainText => (
-                "Export to file (notes stripped)",
-                InputAction::ExportClean,
-            ),
+            export::Target::PlainText => {
+                ("Export to file (notes stripped)", InputAction::ExportClean)
+            }
             export::Target::Rtf => (
                 "Export manuscript RTF to file",
                 InputAction::ExportManuscript,
             ),
-            export::Target::Docx if has_project => {
-                ("Export project DOCX to file", InputAction::ExportProjectDocx)
-            }
+            export::Target::Docx if has_project => (
+                "Export project DOCX to file",
+                InputAction::ExportProjectDocx,
+            ),
             export::Target::Docx => ("Export DOCX to file", InputAction::ExportDocx),
-            export::Target::Epub if has_project => {
-                ("Export project EPUB to file", InputAction::ExportProjectEpub)
-            }
+            export::Target::Epub if has_project => (
+                "Export project EPUB to file",
+                InputAction::ExportProjectEpub,
+            ),
             export::Target::Epub => ("Export EPUB to file", InputAction::ExportEpub),
-            export::Target::Html if has_project => {
-                ("Export project HTML to file", InputAction::ExportProjectHtml)
-            }
+            export::Target::Html if has_project => (
+                "Export project HTML to file",
+                InputAction::ExportProjectHtml,
+            ),
             export::Target::Html => ("Export HTML to file", InputAction::ExportHtml),
         };
         self.mode = Mode::Input {
@@ -4708,6 +4779,50 @@ fn is_prefix_key(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char(c)
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(c.to_ascii_lowercase(), 'k' | 'q' | 'o' | 'p'))
+}
+
+/// The one-line first-use hint for a new-feature command, if it has one
+/// (R12.3). Returning `None` means the command is a plain editing motion or a
+/// long-standing WordStar chord that needs no onboarding nudge. Only the
+/// capabilities added by the pro-writer features carry a hint; each points the
+/// writer at where the feature lives next, without stealing focus.
+fn first_use_hint(cmd: Cmd) -> Option<&'static str> {
+    Some(match cmd {
+        // R1 Binder / project
+        Cmd::ProjectNew | Cmd::ProjectOpen => "Project loaded — ^PB toggles the binder",
+        Cmd::BinderToggle => "Binder: ↑↓ select, Enter opens, ^PE/^PX reorder",
+        // R2 Statistics & goals
+        Cmd::WordCount => "Word count in the status bar — ^OG sets a session goal",
+        Cmd::SetGoal => "Goal set — progress shows in the status bar as you write",
+        Cmd::StatsOverlay => "Writing stats — daily history and readability at a glance",
+        // R3 Sprints & focus
+        Cmd::SprintStart => "Sprint running — ^OP again stops it, ^OF hides all chrome",
+        Cmd::FocusMode => "Focus mode: text only. ^OF again to bring chrome back",
+        // R4 Snapshots
+        Cmd::Snapshot => "Snapshot saved — ^KO lists revisions and diffs them",
+        Cmd::RevisionsList => "Revisions: Enter diffs, ^R restores an older version",
+        // R5 Notes & annotations neighbours
+        Cmd::EditSynopsis => "Synopsis saved — ^PY shows synopses in the binder",
+        Cmd::OpenNotes => "Notes open in a split — ^OK switches windows",
+        // R6 Project search
+        Cmd::ProjectFind => "Project search: Enter opens a match, ^PW replaces across files",
+        Cmd::ProjectReplace => "Project replace: Y/N per match, A all, Q quit",
+        // R7 Export
+        Cmd::ExportMenu => "Export: pick a format, then confirm the output path",
+        // R8 Style
+        Cmd::ToggleStyle => "Style checks on — ^QI jumps to the next issue",
+        Cmd::NextStyleIssue => "Style issues are marked like spelling — ^QI for the next",
+        // R9 Annotations
+        Cmd::Annotate => "Comment added — ^PG/^PU move between comments, ^PL lists them",
+        Cmd::AnnotationList => "Comments never export — Enter jumps to one",
+        // R10 Dictionary / thesaurus
+        Cmd::Thesaurus => "Thesaurus: Enter replaces the word, Esc closes",
+        Cmd::Define => "Definition lookup — Esc closes the panel",
+        // R12 Help itself
+        Cmd::CycleHelpLevel => "Help level cycles: clean screen → menus → hint bar",
+        Cmd::Palette => "Command palette: type a name or chord, Enter runs it",
+        _ => return None,
+    })
 }
 
 fn is_edit_cmd(cmd: Cmd) -> bool {

@@ -660,10 +660,13 @@ fn status_left(app: &App) -> String {
         },
         // The goal-reached banner (R2.4) wins over any transient message while
         // it is fresh: it is time-bounded, must not be dismissed, and must
-        // survive the keystroke that reached the goal.
+        // survive the keystroke that reached the goal. A first-use hint (R12.3)
+        // sits just below it and above the sprint banner: it is the onboarding
+        // nudge for a capability's first invocation and should be seen once.
         Mode::Normal => match app
             .goal_banner()
             .or(app.status_msg.as_deref())
+            .or_else(|| app.first_use_hint())
             .or_else(|| app.sprint_banner())
         {
             Some(msg) => format!(" {msg}"),
@@ -1255,9 +1258,7 @@ fn draw_lookup(frame: &mut Frame, app: &App, text_area: Rect) {
         )));
         lines.push(Line::from(""));
     }
-    let visible = (area.height as usize)
-        .saturating_sub(2 + def_rows)
-        .max(1);
+    let visible = (area.height as usize).saturating_sub(2 + def_rows).max(1);
     let first = selected.saturating_sub(visible.saturating_sub(1));
     if synonyms.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -1612,10 +1613,12 @@ fn draw_diff(frame: &mut Frame, app: &App, text_area: Rect) {
 mod tests {
     use super::*;
     use crate::diff::DiffLine;
+    use crate::keymap::Prefix;
     use crate::snapshot::SnapshotEntry;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
+    use std::time::Duration;
 
     /// Render one frame and return the screen as text lines. Exercises the real
     /// draw path, so a width/unicode mistake in an overlay fails here instead of
@@ -2023,5 +2026,76 @@ mod tests {
         assert!(prompt.contains("Recover unsaved changes"));
         assert!(prompt.contains("y/N"));
         assert!(prompt.contains("Esc decline"));
+    }
+
+    /// Hold a prefix key long enough that the delayed menu is due, regardless
+    /// of the configured menu delay.
+    fn hold_prefix(app: &mut App, prefix: Prefix) {
+        app.menu_delay = Duration::ZERO;
+        app.prefix = Some((prefix, Instant::now()));
+    }
+
+    #[test]
+    fn help_level_0_hides_prefix_menu_and_hint_bar() {
+        // R12.2: level 0 leaves only text + status bar. Even with a prefix held
+        // past its delay, no menu appears; and there is no hint bar row.
+        let mut app = app_with("prose\n");
+        app.help_level = 0;
+        hold_prefix(&mut app, Prefix::P);
+
+        let screen = screen(&mut app).join("\n");
+        assert!(
+            !screen.contains("^P Project"),
+            "prefix menu leaked at level 0: {screen}"
+        );
+        assert!(
+            !screen.contains("^KD save · ^KQ quit"),
+            "hint bar leaked at level 0: {screen}"
+        );
+    }
+
+    #[test]
+    fn help_level_1_shows_delayed_prefix_menu_including_p() {
+        // R12.2: level 1 shows delayed prefix menus, including the new ^P group.
+        let mut app = app_with("prose\n");
+        app.help_level = 1;
+        hold_prefix(&mut app, Prefix::P);
+
+        let screen = screen(&mut app).join("\n");
+        assert!(screen.contains("^P Project"), "{screen}");
+        // A ^P command is listed by name in the menu.
+        assert!(screen.contains("toggle binder"), "{screen}");
+        // Level 1 does not add the hint bar.
+        assert!(
+            !screen.contains("^KD save · ^KQ quit"),
+            "hint bar should not show at level 1: {screen}"
+        );
+    }
+
+    #[test]
+    fn help_level_2_adds_the_hint_bar() {
+        // R12.2: level 2 additionally shows the hint bar.
+        let mut app = app_with("prose\n");
+        app.help_level = 2;
+
+        let screen = screen(&mut app).join("\n");
+        assert!(
+            screen.contains("^KD save · ^KQ quit"),
+            "hint bar missing at level 2: {screen}"
+        );
+    }
+
+    #[test]
+    fn a_first_use_hint_shows_in_the_status_area_but_not_at_level_0() {
+        // R12.3: the hint is a one-line status-area message; R12.4: suppressed
+        // entirely at level 0. This test drives the render path directly by
+        // setting the banner the app would set on first use.
+        let mut app = app_with("prose\n");
+
+        // The banner shows in the status row when help is on.
+        app.help_level = 1;
+        app.set_first_use_hint_for_test("Snapshot saved — ^KO lists revisions and diffs them");
+        let status = screen(&mut app).last().unwrap().clone();
+        assert!(status.contains("lists revisions"), "{status:?}");
     }
 }

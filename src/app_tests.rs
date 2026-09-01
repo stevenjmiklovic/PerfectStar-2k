@@ -1550,7 +1550,8 @@ fn cancelling_a_sprint_records_its_partial_figures() {
     // R3.3: the summary outlives the keystroke that would clear an ordinary
     // status message, so a writer who cancels mid-word still sees it.
     assert!(
-        app.sprint_banner().is_some_and(|b| b.contains("Sprint stopped")),
+        app.sprint_banner()
+            .is_some_and(|b| b.contains("Sprint stopped")),
         "the stopped-sprint summary is non-modal and persistent"
     );
 
@@ -2857,7 +2858,10 @@ fn export_menu_opens_and_lists_all_five_available_formats() {
 
     // Toggle semantics: a second ^KF closes the picker.
     app.execute(Cmd::ExportMenu);
-    assert!(matches!(app.mode, Mode::Normal), "second ^KF closes the menu");
+    assert!(
+        matches!(app.mode, Mode::Normal),
+        "second ^KF closes the menu"
+    );
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -2929,9 +2933,7 @@ fn thesaurus_opens_overlay_and_synonym_replaces_word_as_one_undo() {
 
     app.execute(Cmd::Thesaurus);
     match &app.mode {
-        Mode::Lookup {
-            word, synonyms, ..
-        } => {
+        Mode::Lookup { word, synonyms, .. } => {
             assert_eq!(word, "happy");
             assert!(synonyms.contains(&"joyful".to_string()), "got {synonyms:?}");
         }
@@ -3134,11 +3136,114 @@ fn unavailable_lookup_posts_status_and_does_not_open_overlay() {
     app.execute(Cmd::Thesaurus);
     assert!(matches!(app.mode, Mode::Normal), "overlay must not open");
     assert!(
-        app.status_msg
-            .as_deref()
-            .unwrap()
-            .contains("unavailable"),
+        app.status_msg.as_deref().unwrap().contains("unavailable"),
         "got {:?}",
         app.status_msg
+    );
+}
+
+// --- Phase 14: discoverability — help levels and first-use hints (R12) ----
+
+/// A bare app with the splash cleared and a known help level, for hint tests.
+fn help_app(help_level: u8) -> App {
+    let mut app = App::new(None).unwrap();
+    app.splash = false;
+    app.help_level = help_level;
+    app
+}
+
+#[test]
+fn cycle_help_level_wraps_through_the_three_levels() {
+    // R12.2: help_level takes values 0 (clean), 1 (delayed menus), 2 (hint bar).
+    let mut app = help_app(0);
+    app.execute(Cmd::CycleHelpLevel);
+    assert_eq!(app.help_level, 1);
+    app.execute(Cmd::CycleHelpLevel);
+    assert_eq!(app.help_level, 2);
+    app.execute(Cmd::CycleHelpLevel);
+    assert_eq!(app.help_level, 0, "wraps back to a clean screen");
+}
+
+#[test]
+fn a_new_capability_shows_a_first_use_hint_once() {
+    // R12.3: invoking a new capability for the first time surfaces a one-line
+    // hint. It does not steal focus (mode stays Normal) and does not reappear.
+    let mut app = help_app(1);
+    // Give the thesaurus a resource so the command's own path is benign; the
+    // hint fires regardless of what the command itself does.
+    app.execute(Cmd::WordCount);
+    assert!(
+        app.first_use_hint().is_some(),
+        "first invocation should post a hint"
+    );
+
+    // A second invocation posts no hint — it has been shown once (R12.3).
+    app.first_use_hint = None;
+    app.execute(Cmd::WordCount);
+    assert!(
+        app.first_use_hint().is_none(),
+        "the hint must not reappear for a capability already used"
+    );
+}
+
+#[test]
+fn help_level_0_suppresses_first_use_hints_entirely() {
+    // R12.4: at level 0 no first-use hint is shown, even the very first time.
+    let mut app = help_app(0);
+    app.execute(Cmd::WordCount);
+    assert!(
+        app.first_use_hint().is_none(),
+        "level 0 suppresses all first-use hints"
+    );
+}
+
+#[test]
+fn a_capability_used_silently_at_level_0_never_hints_after_raising_the_level() {
+    // R12.4: using a capability while hints are suppressed still marks it seen,
+    // so raising the help level later does not fire a stale first-use hint.
+    let mut app = help_app(0);
+    app.execute(Cmd::WordCount); // suppressed, but recorded as used
+
+    app.help_level = 2;
+    app.execute(Cmd::WordCount);
+    assert!(
+        app.first_use_hint().is_none(),
+        "no stale hint for a capability already used at level 0"
+    );
+}
+
+#[test]
+fn a_first_use_hint_is_dismissed_by_the_next_keypress() {
+    // R12.3: the hint auto-dismisses immediately on any keypress. The keystroke
+    // that triggers the command keeps its hint; the *next* keystroke clears it.
+    let mut app = help_app(1);
+    // ^OC toggles the word count; the ^O prefix then 'c' invokes it.
+    app.handle_key(ctrl('o'));
+    app.handle_key(plain(KeyCode::Char('c')));
+    assert!(
+        app.first_use_hint().is_some(),
+        "the invoking chord leaves the hint visible"
+    );
+
+    // Any further keypress clears it.
+    app.handle_key(plain(KeyCode::Left));
+    assert!(
+        app.first_use_hint().is_none(),
+        "the next keypress dismisses the hint"
+    );
+}
+
+#[test]
+fn plain_editing_motions_carry_no_first_use_hint() {
+    // R12.3 is about *new capabilities*; the diamond and long-standing chords
+    // should never nag. Cursor motion posts nothing.
+    let mut app = help_app(2);
+    app.buf.insert(0, "some prose here\n");
+    app.execute(Cmd::Right);
+    app.execute(Cmd::WordRight);
+    app.execute(Cmd::Down);
+    assert!(
+        app.first_use_hint().is_none(),
+        "movement is not a hint-worthy capability"
     );
 }

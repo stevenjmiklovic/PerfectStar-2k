@@ -254,7 +254,11 @@ pub const TARGETS: &[Target] = &[
 /// whose dependency is unbundled are omitted here and reported separately via
 /// [`unavailable_targets`] (R7.8).
 pub fn available_targets() -> Vec<Target> {
-    TARGETS.iter().copied().filter(|t| t.is_available()).collect()
+    TARGETS
+        .iter()
+        .copied()
+        .filter(|t| t.is_available())
+        .collect()
 }
 
 /// The (target, missing-dependency) pairs omitted from the selection list, so a

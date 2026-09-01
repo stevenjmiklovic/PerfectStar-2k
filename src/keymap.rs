@@ -834,14 +834,74 @@ mod tests {
 
     #[test]
     fn every_command_is_reachable_by_name_in_the_palette() {
-        // R12.1/R12.4: the palette is generated from BINDINGS, so a command
-        // with a chord but no descriptive name would ship undiscoverable.
+        // R12.1/R12.5: the palette is generated from BINDINGS, so *every*
+        // bound command must surface by a non-empty descriptive name with a
+        // rendered chord — otherwise a feature ships undiscoverable. This is
+        // the comprehensive guarantee, not a spot check of a few commands.
         let entries = palette_entries();
-        for cmd in [Cmd::Snapshot, Cmd::RevisionsList] {
-            let entry = entries.iter().find(|(c, _, _)| *c == cmd);
-            let (_, name, chord) = entry.expect("command missing from palette");
-            assert!(!name.is_empty(), "{cmd:?} has no name");
-            assert!(chord.starts_with("^K"), "{cmd:?} chord is {chord}");
+        for b in BINDINGS {
+            let entry = entries
+                .iter()
+                .find(|(c, _, _)| *c == b.cmd)
+                .unwrap_or_else(|| panic!("{:?} bound but missing from palette", b.cmd));
+            let (_, name, chord) = entry;
+            assert!(!name.trim().is_empty(), "{:?} has no palette name", b.cmd);
+            assert!(
+                chord.starts_with('^'),
+                "{:?} chord {chord} is not a rendered chord",
+                b.cmd
+            );
+            // The command is also findable by typing its own name into the
+            // palette query (R12.5: reachable by descriptive name).
+            assert!(
+                filtered_entries(name).iter().any(|(c, _, _)| c == &b.cmd),
+                "{:?} not found by searching its own name {name:?}",
+                b.cmd
+            );
+        }
+    }
+
+    #[test]
+    fn r10_and_export_menu_commands_surface_in_their_prefix_menus_by_name() {
+        // R12.1: the recently added R10 lookups (^QL, ^QU) and the unified
+        // export picker (^KF) must appear by descriptive name in the delayed
+        // prefix menu for their prefix — the menu is what a level-1 user sees.
+        let q_menu = menu_entries(Prefix::Q);
+        let thesaurus = q_menu.iter().find(|(k, _)| *k == 'l');
+        let define = q_menu.iter().find(|(k, _)| *k == 'u');
+        assert_eq!(thesaurus.map(|(_, n)| *n), Some("thesaurus (synonyms)"));
+        assert_eq!(define.map(|(_, n)| *n), Some("define word"));
+
+        let k_menu = menu_entries(Prefix::K);
+        let export_menu = k_menu.iter().find(|(k, _)| *k == 'f');
+        assert_eq!(export_menu.map(|(_, n)| *n), Some("export (choose format)"));
+
+        // And each is reachable by name in the palette too (keyboard-only
+        // discoverability, R12.5).
+        for cmd in [Cmd::Thesaurus, Cmd::Define, Cmd::ExportMenu] {
+            assert!(
+                palette_entries()
+                    .iter()
+                    .any(|(c, name, _)| *c == cmd && !name.is_empty()),
+                "{cmd:?} not reachable by name in the palette"
+            );
+        }
+    }
+
+    #[test]
+    fn every_prefixed_command_appears_in_its_prefix_menu() {
+        // R12.1/R12.2: a level-1 user discovers prefixed commands through the
+        // delayed prefix menu. Every Pref(...) binding must therefore surface
+        // in menu_entries for its prefix.
+        for b in BINDINGS {
+            if let Pref(prefix, _) = b.chord {
+                assert!(
+                    menu_entries(prefix).iter().any(|(_, name)| *name == b.name),
+                    "{:?} ({}) missing from its prefix menu",
+                    b.cmd,
+                    b.name
+                );
+            }
         }
     }
 
