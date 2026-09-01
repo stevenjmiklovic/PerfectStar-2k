@@ -1,4 +1,5 @@
 mod app;
+mod autocorrect;
 mod block;
 mod buffer;
 mod config;
@@ -7,6 +8,7 @@ mod export;
 mod history;
 mod keymap;
 mod killring;
+mod lookup;
 mod markdown;
 mod meta;
 mod normalize;

@@ -1,0 +1,185 @@
+# PerfectStar 2k bundled lookup resource (R10, ADR-016).
+#
+# Plain-text, offline, compiled into the binary via include_str!.
+# One head-word per line. Tab-separated, three columns:
+#
+#   headword <TAB> synonym,synonym,... <TAB> definition
+#
+# - The headword is matched case-insensitively (lowercased on load).
+# - The synonym column may be empty (thesaurus miss, definition still returned).
+# - The definition column may be empty (definition miss, synonyms still returned).
+# - Lines beginning with '#' and blank lines are comments and ignored.
+#
+# This is a compact starter set, not a full lexicon; ADR-016 records the
+# extension point for a larger user-supplied resource.
+abandon	desert,forsake,relinquish,leave	To give up completely or leave behind.
+able	capable,competent,skilled,fit	Having the power, skill, or means to do something.
+abundant	plentiful,ample,copious,bountiful	Existing or available in large quantities.
+accurate	precise,exact,correct,faithful	Free from error; conforming closely to truth.
+achieve	accomplish,attain,realize,reach	To bring about or reach by effort.
+acute	sharp,keen,intense,severe	Having or showing a keen perception; sharp or intense.
+admire	respect,esteem,revere,appreciate	To regard with respect, warm approval, or pleasure.
+afraid	fearful,frightened,scared,anxious	Feeling fear or anxiety; apprehensive.
+alter	change,modify,adjust,revise	To make different without changing into something else.
+amazing	astonishing,astounding,remarkable,stunning	Causing great surprise or wonder.
+ancient	old,aged,archaic,antique	Belonging to the very distant past.
+angry	furious,irate,enraged,indignant	Feeling or showing strong displeasure.
+answer	reply,respond,retort,rejoin	Something said or written in reaction to a question.
+anxious	worried,uneasy,nervous,apprehensive	Experiencing unease or nervousness about an outcome.
+appear	seem,emerge,materialize,surface	To come into sight or become evident.
+argue	dispute,contend,debate,quarrel	To give reasons for or against a matter.
+ask	inquire,question,request,query	To put a question to or request something.
+astonish	amaze,astound,surprise,stun	To surprise greatly; fill with wonder.
+attack	assault,assail,strike,charge	To take aggressive action against.
+awful	dreadful,terrible,appalling,ghastly	Extremely bad or unpleasant.
+beautiful	lovely,gorgeous,attractive,handsome	Pleasing the senses or mind aesthetically.
+begin	start,commence,initiate,launch	To perform the first part of an action.
+believe	trust,accept,credit,suppose	To accept something as true or real.
+big	large,huge,enormous,immense	Of considerable size, extent, or intensity.
+bitter	acrid,harsh,sour,resentful	Having a sharp, pungent taste; marked by resentment.
+bold	brave,daring,fearless,audacious	Showing a willingness to take risks; confident.
+brave	courageous,valiant,fearless,intrepid	Ready to face and endure danger or pain.
+bright	brilliant,radiant,luminous,vivid	Giving out or reflecting much light; intelligent.
+broad	wide,expansive,extensive,vast	Having an ample distance from side to side.
+build	construct,erect,assemble,fashion	To make by putting parts or material together.
+calm	tranquil,serene,peaceful,placid	Not showing or feeling nervousness or excitement.
+careful	cautious,prudent,meticulous,wary	Making sure of avoiding potential danger or mishap.
+change	alter,modify,transform,vary	To make or become different.
+clear	lucid,plain,evident,transparent	Easy to perceive, understand, or interpret.
+clever	smart,intelligent,shrewd,ingenious	Quick to understand, learn, and devise.
+cold	chilly,frigid,icy,frosty	Of or at a low temperature; lacking warmth.
+common	ordinary,usual,frequent,prevalent	Occurring, found, or done often; prevailing.
+complete	finish,conclude,accomplish,fulfill	To bring to an end; make whole.
+confuse	bewilder,perplex,baffle,muddle	To make unclear or hard to understand.
+courage	bravery,valor,nerve,fortitude	The ability to face danger or difficulty.
+create	make,produce,generate,forge	To bring something into existence.
+cruel	brutal,savage,heartless,merciless	Willfully causing pain or suffering.
+danger	peril,hazard,risk,threat	The possibility of suffering harm or injury.
+dark	dim,gloomy,murky,shadowy	With little or no light.
+decide	determine,resolve,settle,conclude	To come to a resolution after consideration.
+deep	profound,intense,bottomless,abyssal	Extending far down or in; intense.
+delicate	fragile,dainty,fine,frail	Easily broken or damaged; finely made.
+destroy	demolish,ruin,wreck,obliterate	To put an end to; damage beyond repair.
+difficult	hard,arduous,demanding,challenging	Needing much effort or skill to accomplish.
+dirty	filthy,soiled,grimy,unclean	Covered or marked with an unclean substance.
+eager	keen,enthusiastic,avid,fervent	Wanting to do or have something very much.
+easy	simple,effortless,straightforward,facile	Achieved without great effort.
+empty	vacant,void,barren,hollow	Containing nothing; not filled or occupied.
+end	finish,conclude,terminate,cease	The final part of something; to bring to a close.
+enemy	foe,adversary,opponent,antagonist	A person actively opposed or hostile to another.
+enormous	huge,immense,vast,colossal	Very large in size, quantity, or extent.
+explain	clarify,elucidate,describe,expound	To make an idea or situation clear.
+fall	drop,descend,tumble,plunge	To move downward, typically rapidly.
+false	untrue,incorrect,fake,spurious	Not according with truth or fact.
+famous	renowned,celebrated,noted,eminent	Known about by many people.
+fast	quick,rapid,swift,speedy	Moving or capable of moving at high speed.
+fear	dread,fright,terror,alarm	An unpleasant emotion caused by threat of danger.
+fierce	ferocious,savage,violent,intense	Having a heartless and violent nature.
+find	discover,locate,uncover,detect	To discover or perceive by chance or search.
+foolish	silly,unwise,senseless,absurd	Lacking good sense or judgment.
+forgive	pardon,excuse,absolve,exonerate	To stop feeling angry or resentful toward.
+fragile	delicate,brittle,frail,flimsy	Easily broken or damaged.
+free	liberate,release,emancipate,unshackle	Not under the control of another; to set at liberty.
+fresh	new,recent,novel,crisp	Recently made, obtained, or arrived; not stale.
+funny	amusing,comical,humorous,witty	Causing laughter or amusement.
+gather	collect,assemble,accumulate,amass	To bring together from scattered places.
+gentle	mild,tender,soft,soothing	Having a kind and calm temperament.
+give	provide,supply,grant,donate	To freely transfer possession of something.
+glad	happy,pleased,delighted,joyful	Feeling pleasure or contentment.
+gloomy	dark,dismal,dreary,melancholy	Dark or poorly lit; causing sadness.
+great	grand,magnificent,superb,eminent	Of an extent, amount, or intensity above normal.
+grief	sorrow,anguish,mourning,heartache	Deep sorrow, especially caused by loss.
+happy	joyful,cheerful,content,glad	Feeling or showing pleasure or contentment.
+hard	difficult,tough,arduous,firm	Solid, firm, and rigid; requiring effort.
+hate	loathe,detest,despise,abhor	To feel intense dislike or aversion for.
+help	aid,assist,support,abet	To make it easier for someone to do something.
+hide	conceal,cover,cloak,obscure	To put or keep out of sight.
+honest	truthful,sincere,candid,frank	Free of deceit; telling the truth.
+huge	enormous,immense,vast,gigantic	Extremely large in size or amount.
+hurry	rush,hasten,scurry,speed	To move or act with great haste.
+idea	notion,thought,concept,plan	A thought or suggestion about a course of action.
+important	significant,crucial,vital,essential	Of great significance or value.
+increase	grow,expand,augment,enlarge	To become or make greater in size or amount.
+join	connect,unite,link,combine	To bring or come together.
+joy	delight,happiness,elation,bliss	A feeling of great pleasure and happiness.
+jump	leap,spring,bound,vault	To push oneself off a surface into the air.
+keep	retain,hold,preserve,maintain	To continue to have; to hold on to.
+kind	generous,considerate,benevolent,gentle	Having a friendly, generous nature.
+know	understand,recognize,comprehend,perceive	To be aware of through observation or information.
+large	big,huge,vast,substantial	Of considerable or relatively great size.
+laugh	chuckle,giggle,guffaw,chortle	To make sounds and movements expressing amusement.
+lazy	idle,indolent,slothful,sluggish	Unwilling to work or use energy.
+lie	falsehood,fib,untruth,fabrication	An intentionally false statement.
+light	bright,luminous,pale,weightless	Having plenty of light; not heavy.
+little	small,tiny,slight,minute	Small in size, amount, or degree.
+lonely	solitary,forlorn,isolated,desolate	Sad because one has no company.
+look	gaze,glance,stare,peer	To direct one's eyes toward something.
+loud	noisy,deafening,booming,thunderous	Producing much noise; strong in sound.
+love	adore,cherish,treasure,idolize	An intense feeling of deep affection.
+make	create,produce,build,form	To form something by combining parts.
+mistake	error,blunder,slip,fault	An action or judgment that is misguided or wrong.
+move	shift,budge,relocate,transfer	To change position or place.
+narrow	tight,slim,constricted,cramped	Of small width in relation to length.
+new	fresh,novel,recent,modern	Not existing before; recently made.
+nice	pleasant,agreeable,delightful,kind	Giving pleasure or satisfaction.
+old	aged,ancient,elderly,antique	Having lived or existed for a long time.
+open	unlock,unfasten,unseal,reveal	Allowing access, passage, or a view.
+pain	ache,suffering,agony,discomfort	Physical suffering or discomfort.
+part	portion,section,segment,fragment	A piece or segment of a whole.
+plain	simple,unadorned,clear,obvious	Not decorated or elaborate; easy to see.
+pleasant	agreeable,delightful,enjoyable,nice	Giving a sense of happy satisfaction.
+poor	impoverished,destitute,needy,penniless	Lacking sufficient money or resources.
+powerful	strong,mighty,potent,forceful	Having great power or strength.
+praise	commend,applaud,laud,extol	To express warm approval or admiration.
+proud	dignified,honored,pleased,arrogant	Feeling deep satisfaction in achievements.
+quick	fast,rapid,swift,speedy	Moving or done with speed.
+quiet	silent,still,hushed,tranquil	Making little or no noise.
+rare	uncommon,scarce,infrequent,unusual	Not occurring very often.
+real	genuine,authentic,actual,true	Actually existing as a thing; not imagined.
+rich	wealthy,affluent,prosperous,opulent	Having a great deal of money or assets.
+right	correct,proper,accurate,just	Morally good, justified, or acceptable.
+rough	coarse,uneven,harsh,rugged	Having an uneven or irregular surface.
+sad	unhappy,sorrowful,mournful,dejected	Feeling or showing sorrow; unhappy.
+safe	secure,protected,unharmed,sheltered	Protected from danger or risk.
+scared	frightened,afraid,terrified,alarmed	Fearful; filled with fear.
+secret	hidden,concealed,covert,clandestine	Kept from the knowledge of others.
+serious	grave,solemn,earnest,severe	Demanding careful consideration; not trivial.
+sharp	keen,pointed,acute,cutting	Having an edge or point able to cut; keen.
+shine	gleam,glow,glisten,sparkle	To give out a bright light.
+short	brief,concise,fleeting,curt	Measuring little from end to end; brief.
+show	display,exhibit,reveal,demonstrate	To allow to be seen; to present to view.
+shy	timid,bashful,reserved,diffident	Nervous or timid in the company of others.
+sick	ill,unwell,ailing,nauseous	Affected by physical or mental illness.
+silent	quiet,still,hushed,mute	Not making or accompanied by any sound.
+simple	easy,plain,straightforward,uncomplicated	Easily understood or done; plain.
+slow	sluggish,leisurely,gradual,unhurried	Moving or operating at a low speed.
+small	little,tiny,minute,compact	Of a size that is less than normal.
+smart	intelligent,clever,bright,sharp	Having or showing quick intelligence.
+soft	tender,gentle,supple,cushioned	Easy to mold, cut, compress, or fold.
+sorrow	grief,sadness,woe,anguish	A feeling of deep distress caused by loss.
+speak	talk,utter,express,articulate	To say words in order to convey information.
+strange	odd,peculiar,unusual,bizarre	Unusual or surprising; hard to understand.
+strong	powerful,mighty,sturdy,robust	Having the power to move heavy weights.
+stupid	foolish,dull,dense,obtuse	Having or showing a lack of intelligence.
+sudden	abrupt,unexpected,swift,hasty	Occurring quickly and without warning.
+surprise	astonish,amaze,startle,astound	To cause to feel mild astonishment or shock.
+sweet	sugary,pleasant,mellow,agreeable	Having a taste like sugar; pleasing.
+take	grab,seize,grasp,capture	To lay hold of with the hands.
+tell	inform,notify,relate,narrate	To communicate information to someone.
+think	ponder,consider,contemplate,reflect	To use the mind to form connected ideas.
+tired	weary,exhausted,fatigued,drained	In need of sleep or rest; weary.
+true	accurate,correct,genuine,faithful	In accordance with fact or reality.
+ugly	unattractive,hideous,unsightly,repulsive	Unpleasant or repulsive in appearance.
+understand	comprehend,grasp,perceive,fathom	To perceive the intended meaning of.
+use	employ,utilize,apply,wield	To take, hold, or deploy as a means to an end.
+vague	unclear,indistinct,hazy,ambiguous	Of uncertain, indefinite, or unclear character.
+walk	stroll,amble,saunter,tread	To move at a regular pace by lifting each foot.
+want	desire,crave,wish,covet	To have a desire to possess or do something.
+warm	heated,tepid,cozy,genial	Of or at a fairly high temperature.
+weak	feeble,frail,fragile,faint	Lacking physical strength or energy.
+wet	damp,moist,soaked,drenched	Covered or saturated with liquid.
+wild	untamed,savage,feral,unruly	Living in a natural state; not domesticated.
+wise	sage,prudent,sensible,judicious	Having experience, knowledge, and good judgment.
+wonderful	marvelous,splendid,superb,fabulous	Inspiring delight, pleasure, or admiration.
+worry	fret,agonize,brood,stress	To give way to anxiety or unease.
+wrong	incorrect,mistaken,erroneous,false	Not correct or true; mistaken.

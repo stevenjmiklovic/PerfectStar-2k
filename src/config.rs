@@ -53,6 +53,15 @@ pub struct Config {
     pub style_sentence_words: usize,
     /// Body font for `^KM` manuscript RTF export: "times" or "courier".
     pub manuscript_font: String,
+    /// Run config-driven autocorrect/expansion on a word separator (R10.4).
+    /// The global disable switch for the whole rule set.
+    pub autocorrect: bool,
+    /// Run smart typographic substitution — straight→curly quotes, `--`→em
+    /// dash, `...`→ellipsis — as you type (R10.6). Independent of `autocorrect`.
+    pub smart_typography: bool,
+    /// Path to a custom autocorrect rules file; `None` uses the bundled set
+    /// (R10.4). Follows the bundled-resource-with-override pattern.
+    pub autocorrect_rules: Option<String>,
 }
 
 impl Default for Config {
@@ -77,6 +86,9 @@ impl Default for Config {
             style_long_sentences: true,
             style_sentence_words: 30,
             manuscript_font: String::from("times"),
+            autocorrect: true,
+            smart_typography: true,
+            autocorrect_rules: None,
         }
     }
 }
@@ -196,6 +208,38 @@ mod tests {
         assert!(Config::default().focus_dim);
         let config: Config = toml::from_str("focus_dim = false\n").unwrap();
         assert!(!config.focus_dim);
+    }
+
+    #[test]
+    fn old_config_without_r10_fields_uses_defaults() {
+        // R10.4/R10.6: an old config file predating autocorrect must still
+        // parse and pick up the new defaults, matching the back-compat pattern.
+        let config: Config = toml::from_str("theme = 'wordstar'\n").unwrap();
+
+        assert!(config.autocorrect, "autocorrect defaults on (R10.4)");
+        assert!(
+            config.smart_typography,
+            "smart typography defaults on (R10.6)"
+        );
+        assert_eq!(
+            config.autocorrect_rules, None,
+            "no path override means the bundled rule set"
+        );
+    }
+
+    #[test]
+    fn r10_fields_parse_when_present() {
+        let config: Config = toml::from_str(
+            "autocorrect = false\nsmart_typography = false\nautocorrect_rules = '/etc/pstar/rules.txt'\n",
+        )
+        .unwrap();
+
+        assert!(!config.autocorrect);
+        assert!(!config.smart_typography);
+        assert_eq!(
+            config.autocorrect_rules.as_deref(),
+            Some("/etc/pstar/rules.txt")
+        );
     }
 
     #[test]
