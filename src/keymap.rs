@@ -160,6 +160,11 @@ pub enum Cmd {
     ToggleStyle,
     /// Jump to the next style issue, as ^QN does for spelling (R8.3).
     NextStyleIssue,
+    /// Dictionary / thesaurus (R10)
+    /// Look up synonyms for the word at the cursor or selection (R10.1).
+    Thesaurus,
+    /// Look up the definition of the word at the cursor or selection (R10.2).
+    Define,
 }
 
 /// How a command is typed.
@@ -345,6 +350,20 @@ pub const BINDINGS: &[Binding] = &[
         cmd: Cmd::NextStyleIssue,
         chord: Pref(Q, 'i'),
         name: "next style issue",
+    },
+    // Dictionary/thesaurus lookups sit with the other "look up the word here"
+    // ^Q commands (next-misspelling, next-style-issue). ^QL reads as "Look up"
+    // and ^QU as "Understand/definition"; both are free ^Q letters (R10.1,
+    // R10.2).
+    Binding {
+        cmd: Cmd::Thesaurus,
+        chord: Pref(Q, 'l'),
+        name: "thesaurus (synonyms)",
+    },
+    Binding {
+        cmd: Cmd::Define,
+        chord: Pref(Q, 'u'),
+        name: "define word",
     },
     Binding {
         cmd: Cmd::FindIncremental,
@@ -842,6 +861,38 @@ mod tests {
                 .iter()
                 .any(|(c, name, _)| *c == Cmd::ExportMenu && !name.is_empty())
         );
+    }
+
+    #[test]
+    fn lookup_commands_are_bound_without_stealing_a_chord() {
+        // R10.1/R10.2: ^QL and ^QU resolve to the lookup commands, and the
+        // existing ^Q bindings they sit beside are untouched.
+        assert_eq!(lookup_prefixed(Prefix::Q, 'l'), Some(Cmd::Thesaurus));
+        assert_eq!(lookup_prefixed(Prefix::Q, 'u'), Some(Cmd::Define));
+        // Neighbouring ^Q commands keep their chords.
+        assert_eq!(lookup_prefixed(Prefix::Q, 'n'), Some(Cmd::NextMisspelling));
+        assert_eq!(lookup_prefixed(Prefix::Q, 'i'), Some(Cmd::NextStyleIssue));
+        assert_eq!(lookup_prefixed(Prefix::Q, 'o'), Some(Cmd::Outline));
+        assert_eq!(lookup_prefixed(Prefix::Q, 'f'), Some(Cmd::FindIncremental));
+        // ^L bare (find next) is a different namespace and stays put.
+        assert_eq!(lookup_bare('l'), Some(Cmd::FindNext));
+    }
+
+    #[test]
+    fn lookup_commands_are_reachable_by_name_in_the_palette() {
+        // R12.1: the palette/menu/help are generated from BINDINGS, so the new
+        // R10 commands must appear by name with their ^Q chord.
+        let entries = palette_entries();
+        for cmd in [Cmd::Thesaurus, Cmd::Define] {
+            let entry = entries.iter().find(|(c, _, _)| *c == cmd);
+            let (_, name, chord) = entry.expect("lookup command missing from palette");
+            assert!(!name.is_empty(), "{cmd:?} has no name");
+            assert!(chord.starts_with("^Q"), "{cmd:?} chord is {chord}");
+        }
+        // They also show up in the ^Q prefix menu.
+        let q_menu = menu_entries(Prefix::Q);
+        assert!(q_menu.iter().any(|(k, _)| *k == 'l'));
+        assert!(q_menu.iter().any(|(k, _)| *k == 'u'));
     }
 
     #[test]

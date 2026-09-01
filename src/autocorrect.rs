@@ -54,6 +54,11 @@ pub struct Autocorrect {
 }
 
 impl Autocorrect {
+    /// The bundled ruleset text (ADR-016), exposed so the app can layer a
+    /// user's custom rules file on top before construction (R10.4): a later
+    /// duplicate trigger wins, so the user's rule overrides the bundled one.
+    pub const BUNDLED_RULES: &'static str = BUNDLED_RULES;
+
     /// Build from the bundled offline ruleset (ADR-016).
     ///
     /// Because the data is compiled in, this always succeeds with a non-empty

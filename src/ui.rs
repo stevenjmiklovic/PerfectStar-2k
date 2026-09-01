@@ -142,6 +142,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if matches!(app.mode, Mode::Annotations { .. }) {
         draw_annotations(frame, app, text_area);
     }
+    if matches!(app.mode, Mode::Lookup { .. }) {
+        draw_lookup(frame, app, text_area);
+    }
     if matches!(app.mode, Mode::ExportMenu { .. }) {
         draw_export_menu(frame, app, text_area);
     }
@@ -642,6 +645,13 @@ fn status_left(app: &App) -> String {
                 entries.len()
             ),
         },
+        Mode::Lookup { synonyms, .. } => {
+            if synonyms.is_empty() {
+                String::from(" Esc close")
+            } else {
+                String::from(" ↑↓ select · Enter replace word · Esc close")
+            }
+        }
         // The R7.8 "unavailable format" notice (a status_msg) wins over the
         // nav hint so the writer sees why a format is missing from the list.
         Mode::ExportMenu { .. } => match &app.status_msg {
@@ -1202,6 +1212,76 @@ fn draw_annotations(frame: &mut Frame, app: &App, text_area: Rect) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .title(" Comments ")
+                .style(app.theme.status),
+        ),
+        area,
+    );
+}
+
+/// Thesaurus / definition overlay for the word under the cursor (^QL / ^QU,
+/// R10.1–R10.3). The definition heads the panel; synonyms follow as a navigable
+/// list — Enter on one replaces the word as a single undoable edit. Dismissed
+/// with Esc.
+fn draw_lookup(frame: &mut Frame, app: &App, text_area: Rect) {
+    let Mode::Lookup {
+        word,
+        synonyms,
+        definition,
+        selected,
+    } = &app.mode
+    else {
+        return;
+    };
+
+    let width = (text_area.width.saturating_sub(6)).clamp(30, 72);
+    let max_list = (text_area.height as usize).saturating_sub(6).clamp(3, 12);
+    // Rows: optional definition (wrapped, budget 3) + a header + synonyms.
+    let def_rows = if definition.is_empty() { 0 } else { 2 };
+    let list_rows = synonyms.len().clamp(1, max_list);
+    let height = (def_rows + list_rows + 2) as u16;
+    let area = Rect {
+        x: text_area.x + (text_area.width.saturating_sub(width)) / 2,
+        y: text_area.y + 1,
+        width,
+        height: height.min(text_area.height),
+    };
+
+    let inner = area.width.saturating_sub(2) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    if !definition.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", clip(definition.clone(), inner.saturating_sub(1))),
+            app.theme.dim,
+        )));
+        lines.push(Line::from(""));
+    }
+    let visible = (area.height as usize)
+        .saturating_sub(2 + def_rows)
+        .max(1);
+    let first = selected.saturating_sub(visible.saturating_sub(1));
+    if synonyms.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " no synonyms recorded",
+            app.theme.dim,
+        )));
+    } else {
+        for (i, syn) in synonyms.iter().enumerate().skip(first).take(visible) {
+            let row = format!(" {syn}");
+            if i == *selected {
+                lines.push(Line::from(Span::styled(row, app.theme.block)));
+            } else {
+                lines.push(Line::from(row));
+            }
+        }
+    }
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).style(app.theme.status).block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(format!(" {word} "))
                 .style(app.theme.status),
         ),
         area,

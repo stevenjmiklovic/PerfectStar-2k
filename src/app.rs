@@ -14,9 +14,11 @@ use crate::export::docx::DocxExporter;
 use crate::export::epub::EpubExporter;
 use crate::export::html::{HtmlExporter, PlainTextExporter};
 use crate::export::{self, CompiledDoc, Exporter};
+use crate::autocorrect::Autocorrect;
 use crate::history::{Edit, EditGroup, EditKind};
 use crate::keymap::{self, Cmd, Prefix};
 use crate::killring::{KillRing, PutCycle};
+use crate::lookup::{self, LookupState};
 use crate::meta;
 use crate::normalize;
 use crate::outline;
@@ -174,6 +176,19 @@ pub enum Mode {
     /// Every editorial comment in the document (R9.4).
     Annotations {
         entries: Vec<meta::Annotation>,
+        selected: usize,
+    },
+    /// Thesaurus / definition lookup for the word under the cursor (R10.1,
+    /// R10.2). Dismissed by Esc; selecting a synonym replaces the word as a
+    /// single undoable edit (R10.3).
+    Lookup {
+        /// The word the overlay is about (as it appears under the cursor).
+        word: String,
+        /// Candidate synonyms; empty if the entry has none.
+        synonyms: Vec<String>,
+        /// The definition; empty if the entry has none.
+        definition: String,
+        /// Highlighted synonym in the list.
         selected: usize,
     },
     /// The unified export format picker (R7.2): choose a target, then a path.
@@ -340,6 +355,16 @@ pub struct App {
     pub focus: Option<Focus>,
     /// Whether focus mode dims everything outside the current paragraph (R3.4).
     pub focus_dim: bool,
+    /// The bundled offline thesaurus/definition resource, or a typed
+    /// `Unavailable` (R10.1, R10.2, R10.7). Loaded once at startup.
+    pub lookup: LookupState,
+    /// The autocorrect/expansion engine (R10.4). `None` when the whole feature
+    /// is disabled (`config.autocorrect = false`) so the typing path skips it
+    /// silently rather than testing a flag on every keystroke.
+    pub autocorrect: Option<Autocorrect>,
+    /// Whether smart typographic substitution runs as the writer types (R10.6),
+    /// independent of `autocorrect`.
+    pub smart_typography: bool,
 }
 
 /// `App` dereferences to the active pane, so the whole editing engine —
@@ -380,6 +405,34 @@ impl App {
             )
         };
         let start_words = initial_stats.words;
+        // R10 offline resources are compiled into the binary (ADR-016), so they
+        // load deterministically even under `cfg!(test)` — no writer directory
+        // is touched. The thesaurus carries both synonyms and definitions.
+        let lookup = lookup::LookupResource::bundled();
+        // Autocorrect: bundled rules, with an optional user file layered on top
+        // (a later duplicate trigger wins, so user rules override — R10.4). The
+        // whole feature collapses to `None` when disabled, keeping it off the
+        // hot path entirely.
+        let autocorrect = if config.autocorrect {
+            match config
+                .autocorrect_rules
+                .as_deref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+            {
+                // A custom file layers on top of the bundled set: concatenate so
+                // a later duplicate trigger (the user's) wins (R10.4).
+                Some(user) => {
+                    let mut text = String::from(Autocorrect::BUNDLED_RULES);
+                    text.push('\n');
+                    text.push_str(&user);
+                    Some(Autocorrect::from_str(&text))
+                }
+                None => Some(Autocorrect::bundled()),
+            }
+        } else {
+            None
+        };
+        let smart_typography = config.smart_typography;
         let mut app = App {
             panes: vec![pane],
             active: 0,
@@ -448,6 +501,9 @@ impl App {
             sprint_banner: None,
             focus: None,
             focus_dim: config.focus_dim,
+            lookup,
+            autocorrect,
+            smart_typography,
         };
         app.load_annotations(0);
         app.offer_recovery_for_active();
@@ -904,6 +960,7 @@ impl App {
             Mode::ProjectSearch { .. } => self.handle_project_search_key(key),
             Mode::Revisions { .. } => self.handle_revisions_key(key),
             Mode::Annotations { .. } => self.handle_annotations_key(key),
+            Mode::Lookup { .. } => self.handle_lookup_key(key),
             Mode::ExportMenu { .. } => self.handle_export_menu_key(key),
             Mode::Diff { .. } => self.handle_diff_key(key),
             Mode::Normal => self.handle_normal_key(key),
@@ -940,11 +997,194 @@ impl App {
             KeyCode::Esc => self.execute(Cmd::Palette),
             KeyCode::Backspace => self.execute(Cmd::DeleteLeft),
             KeyCode::Delete => self.execute(Cmd::DeleteRight),
-            KeyCode::Enter => self.insert_text("\n", EditKind::Other),
+            KeyCode::Enter => self.type_char('\n'),
             KeyCode::Tab => self.insert_text("\t", EditKind::InsertChar),
-            KeyCode::Char(c) => self.insert_text(&c.to_string(), EditKind::InsertChar),
+            KeyCode::Char(c) => self.type_char(c),
             _ => {}
         }
+    }
+
+    /// Type one character in `Mode::Normal`, applying smart typography (R10.6)
+    /// and autocorrect (R10.4) as it goes. Both stay off the hot path: they run
+    /// only when the character is a substitution trigger or a word separator,
+    /// and each fires at most one `HashMap` hit or a fixed-width scan of the
+    /// characters just before the cursor — never a whole-document rescan (R10.8).
+    ///
+    /// Every substitution is applied as a **single undo group** so one ^U
+    /// restores exactly what the writer typed (R10.5): the block-move pattern of
+    /// `apply_raw` per edit followed by `history.record_group`.
+    fn type_char(&mut self, c: char) {
+        // Overtype and non-normal insertion have their own edit shape; keep the
+        // typography/autocorrect path to plain forward typing at the cursor.
+        let can_transform = !self.overtype && self.mode_is_normal_insert();
+
+        // 1) Smart typography: substitute the just-typed char in place, judging
+        //    open/close by the character immediately before the cursor. The
+        //    replacement (dropping any consumed lead chars like the first '-'
+        //    of "--" and emitting the glyph) is one undo group (R10.5/R10.6).
+        if can_transform && self.smart_typography && is_typography_trigger(c) {
+            if let Some((glyph, consumed_before)) = self.smart_sub_for(c) {
+                let cursor_before = self.cursor;
+                let at = self.cursor - consumed_before;
+                let deleted = self.buf.rope.slice(at..self.cursor).to_string();
+                self.apply_raw(at, consumed_before, "");
+                self.apply_raw(at, 0, &glyph.to_string());
+                let after = at + 1;
+                self.history.record_group(
+                    vec![
+                        Edit {
+                            at,
+                            deleted,
+                            inserted: String::new(),
+                        },
+                        Edit {
+                            at,
+                            deleted: String::new(),
+                            inserted: glyph.to_string(),
+                        },
+                    ],
+                    cursor_before,
+                    after,
+                );
+                self.set_cursor(after);
+                return;
+            }
+        }
+
+        // 2) Insert the character normally (coalescing with the typed run).
+        let kind = if c == '\n' {
+            EditKind::Other
+        } else {
+            EditKind::InsertChar
+        };
+        self.insert_text(&c.to_string(), kind);
+
+        // 3) Autocorrect fires on a word separator: the just-typed char ended a
+        //    word. Replace the whole "word + separator" the writer just typed
+        //    with "correction + separator" as ONE undo group, so a single ^U
+        //    puts back exactly what was typed (R10.4, R10.5).
+        if can_transform && is_word_separator(c) {
+            self.maybe_autocorrect();
+        }
+    }
+
+    /// Whether the active mode is normal typing (so transforms are safe).
+    fn mode_is_normal_insert(&self) -> bool {
+        matches!(self.mode, Mode::Normal)
+    }
+
+    /// If a smart-typography substitution applies for the char `c` just typed
+    /// (before it is inserted), return the replacement glyph and how many
+    /// characters immediately before the cursor it also consumes.
+    ///
+    /// This detects runs that *end* at the cursor (the on-type case), which
+    /// [`normalize::smart_char`] does not — that one scans a run forward from a
+    /// fixed index for whole-string smartening. Only a tiny fixed lookback is
+    /// read from the buffer, so this never scans the document (R10.8):
+    ///
+    ///   - `-` completing `--` → em dash, consuming the one `-` before it,
+    ///   - `.` completing `...` → ellipsis, consuming the two `.` before it,
+    ///   - `"`/`'` → curly quote/apostrophe (open or close per the prior char),
+    ///     consuming nothing extra.
+    fn smart_sub_for(&self, c: char) -> Option<(char, usize)> {
+        let cursor = self.cursor;
+        // Chars immediately before the cursor (at most two matter here).
+        let start = cursor.saturating_sub(2);
+        let before: Vec<char> = self.buf.rope.slice(start..cursor).chars().collect();
+        let prev = before.last().copied();
+        match c {
+            '-' => {
+                // `--`: the char before the cursor is also '-'.
+                if prev == Some('-') {
+                    Some(('\u{2014}', 1))
+                } else {
+                    None
+                }
+            }
+            '.' => {
+                // `...`: the two chars before the cursor are both '.'.
+                if before.len() == 2 && before[0] == '.' && before[1] == '.' {
+                    Some(('\u{2026}', 2))
+                } else {
+                    None
+                }
+            }
+            '"' => Some((
+                if normalize::opens_quote(prev) {
+                    '\u{201C}'
+                } else {
+                    '\u{201D}'
+                },
+                0,
+            )),
+            '\'' => Some((
+                if normalize::opens_quote(prev) {
+                    '\u{2018}'
+                } else {
+                    '\u{2019}'
+                },
+                0,
+            )),
+            _ => None,
+        }
+    }
+
+    /// The word separator was just inserted; the cursor sits right after it.
+    /// If the word that precedes the separator has a correction, replace the
+    /// whole "word + separator" span the writer just typed with
+    /// "correction + separator" as **one undo group** whose recorded `deleted`
+    /// is exactly the typed text — so a single ^U restores what was typed,
+    /// separator and all (R10.4, R10.5).
+    ///
+    /// The word is found by a single scan of the current line (no document
+    /// rescan, R10.8) and a single `HashMap` lookup.
+    fn maybe_autocorrect(&mut self) {
+        let Some(ac) = &self.autocorrect else {
+            return; // feature disabled: skip silently.
+        };
+        // The just-typed separator is the char immediately before the cursor.
+        let cursor = self.cursor;
+        if cursor < 2 {
+            return;
+        }
+        let sep_start = self.buf.prev_grapheme(cursor);
+        let sep_str = self.buf.rope.slice(sep_start..cursor).to_string();
+        // The word ends where the separator begins.
+        let line = self.buf.line_of(sep_start);
+        let line_start = self.buf.line_start(line);
+        let text = self.buf.line_text(line);
+        let end_off = sep_start - line_start;
+        let Some((s, e)) = spellcheck::word_spans(&text)
+            .into_iter()
+            .find(|&(s, e)| s != e && e == end_off)
+        else {
+            return;
+        };
+        let word: String = text.chars().skip(s).take(e - s).collect();
+        let Some(correction) = ac.correct_word(&word) else {
+            return;
+        };
+        if correction == word {
+            return;
+        }
+        let word_start = line_start + s;
+        // The span the writer just typed: word + separator. Replace it with
+        // correction + separator, recording the typed span as `deleted`.
+        let typed: String = format!("{word}{sep_str}");
+        let replacement = format!("{correction}{sep_str}");
+        let cursor_before = cursor;
+        self.apply_raw(word_start, typed.chars().count(), &replacement);
+        let cursor_after = word_start + replacement.chars().count();
+        self.history.record_group(
+            vec![Edit {
+                at: word_start,
+                deleted: typed,
+                inserted: replacement,
+            }],
+            cursor_before,
+            cursor_after,
+        );
+        self.set_cursor(cursor_after);
     }
 
     fn handle_palette_key(&mut self, key: KeyEvent) {
@@ -1563,6 +1803,8 @@ impl App {
                 }));
             }
             Cmd::NextStyleIssue => self.next_style_issue(),
+            Cmd::Thesaurus => self.open_lookup(true),
+            Cmd::Define => self.open_lookup(false),
         }
         if !matches!(cmd, Cmd::Undo) && !is_edit_cmd(cmd) {
             self.history.break_group();
@@ -1842,6 +2084,114 @@ impl App {
             .into_iter()
             .find(|&(s, e)| s != e && offset >= s && offset <= e)
             .map(|(s, e)| text.chars().skip(s).take(e - s).collect())
+    }
+
+    /// The char range of the word touching the cursor (inside it, or right
+    /// after it as when a word was just typed), for in-place replacement. Uses
+    /// the same span finder as [`word_at_cursor`] so the string and the range
+    /// always agree.
+    fn word_range_at_cursor(&self) -> Option<(usize, usize)> {
+        let line = self.buf.line_of(self.cursor);
+        let line_start = self.buf.line_start(line);
+        let text = self.buf.line_text(line);
+        let offset = self.cursor - line_start;
+        spellcheck::word_spans(&text)
+            .into_iter()
+            .find(|&(s, e)| s != e && offset >= s && offset <= e)
+            .map(|(s, e)| (line_start + s, line_start + e))
+    }
+
+    /// ^QL / ^QU: open the lookup overlay for the word under the cursor
+    /// (R10.1, R10.2). `thesaurus` picks which is emphasised, but the bundled
+    /// resource carries both synonyms and a definition, so the overlay shows
+    /// whatever the entry has.
+    ///
+    /// When the resource is unavailable the overlay never opens: a non-blocking
+    /// status message names the missing resource and the command is effectively
+    /// disabled (R10.7). A word that isn't in the resource posts a "no entry"
+    /// status rather than an empty overlay.
+    fn open_lookup(&mut self, thesaurus: bool) {
+        let resource = match self.lookup.resource() {
+            Some(r) => r,
+            None => {
+                // R10.7: name the unavailable resource, disable the command.
+                self.status_msg = self.lookup.unavailable().map(|u| u.message());
+                return;
+            }
+        };
+        let Some(word) = self.word_at_cursor() else {
+            self.status_msg = Some(String::from("No word under the cursor"));
+            return;
+        };
+        let Some(result) = resource.lookup(&word) else {
+            self.status_msg = Some(format!("No entry for “{word}”"));
+            return;
+        };
+        // Both lookups surface both fields; only the "no useful data" case
+        // differs by which command was invoked.
+        if thesaurus && !result.has_synonyms() {
+            self.status_msg = Some(format!("No synonyms for “{word}”"));
+            return;
+        }
+        if !thesaurus && !result.has_definition() {
+            self.status_msg = Some(format!("No definition for “{word}”"));
+            return;
+        }
+        self.mode = Mode::Lookup {
+            word,
+            synonyms: result.synonyms,
+            definition: result.definition,
+            selected: 0,
+        };
+    }
+
+    fn handle_lookup_key(&mut self, key: KeyEvent) {
+        let (count, selected) = match &self.mode {
+            Mode::Lookup {
+                synonyms, selected, ..
+            } => (synonyms.len(), *selected),
+            _ => return,
+        };
+        let last = count.saturating_sub(1);
+        match list_nav_key(&key) {
+            ListNav::Dismiss => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            ListNav::Up => {
+                if let Mode::Lookup { selected, .. } = &mut self.mode {
+                    *selected = selected.saturating_sub(1);
+                }
+                return;
+            }
+            ListNav::Down => {
+                if let Mode::Lookup { selected, .. } = &mut self.mode {
+                    *selected = (*selected + 1).min(last);
+                }
+                return;
+            }
+            ListNav::Other => {}
+        }
+        if key.code == KeyCode::Enter {
+            let choice = match &self.mode {
+                Mode::Lookup { synonyms, .. } => synonyms.get(selected).cloned(),
+                _ => None,
+            };
+            self.mode = Mode::Normal;
+            if let Some(synonym) = choice {
+                self.replace_word_with(&synonym);
+            }
+        }
+    }
+
+    /// Replace the word touching the cursor with `replacement` as a single
+    /// undoable edit (R10.3), leaving the cursor at the end of the new word.
+    fn replace_word_with(&mut self, replacement: &str) {
+        let Some((start, end)) = self.word_range_at_cursor() else {
+            return;
+        };
+        let after = start + replacement.chars().count();
+        self.apply_edit(start, end - start, replacement, EditKind::Other, after);
     }
 
     /// ^QN: the char position of the next misspelled word strictly after the
@@ -4377,6 +4727,21 @@ fn is_edit_cmd(cmd: Cmd) -> bool {
             | Cmd::Put
             | Cmd::CopyFromOther
     )
+}
+
+/// Whether a typed character can trigger a smart-typography substitution
+/// (R10.6): straight quotes, hyphen (for `--`), and period (for `...`). Cheap
+/// gate so the substitution scan only runs on these characters.
+fn is_typography_trigger(c: char) -> bool {
+    matches!(c, '"' | '\'' | '-' | '.')
+}
+
+/// Whether a typed character ends a word for autocorrect purposes (R10.4):
+/// a separator is anything that is not part of a word span — whitespace,
+/// punctuation, or the Enter newline. Alphanumerics and internal
+/// apostrophes/hyphens are word characters and do not fire autocorrect.
+fn is_word_separator(c: char) -> bool {
+    c == '\n' || (!c.is_alphanumeric() && c != '\'' && c != '-')
 }
 
 fn prefix_caret(prefix: Prefix) -> &'static str {

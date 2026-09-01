@@ -2917,3 +2917,228 @@ fn export_menu_routes_rich_formats_to_project_actions_when_a_project_is_loaded()
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+// ---- R10: Dictionary, Thesaurus, Autocorrect (task 13.5) --------------------
+
+#[test]
+fn thesaurus_opens_overlay_and_synonym_replaces_word_as_one_undo() {
+    // R10.1, R10.3, R10.5: the lookup overlay shows synonyms for a known word,
+    // choosing one replaces it as a single undoable edit.
+    let (_dir, _source, mut app) = test_app("lookup-thes", "I am happy today\n");
+    app.set_cursor(5); // inside "happy"
+
+    app.execute(Cmd::Thesaurus);
+    match &app.mode {
+        Mode::Lookup {
+            word, synonyms, ..
+        } => {
+            assert_eq!(word, "happy");
+            assert!(synonyms.contains(&"joyful".to_string()), "got {synonyms:?}");
+        }
+        _ => panic!("expected Lookup mode"),
+    }
+
+    // Select "joyful" — find its index.
+    let idx = match &app.mode {
+        Mode::Lookup { synonyms, .. } => synonyms
+            .iter()
+            .position(|s| s == "joyful")
+            .expect("joyful in list"),
+        _ => unreachable!(),
+    };
+    if let Mode::Lookup { selected, .. } = &mut app.mode {
+        *selected = idx;
+    }
+    app.handle_lookup_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    // Back in Normal mode, "happy" replaced with "joyful".
+    assert!(matches!(app.mode, Mode::Normal));
+    assert!(
+        app.buf.rope.to_string().contains("joyful"),
+        "got {}",
+        app.buf.rope.to_string()
+    );
+    assert!(!app.buf.rope.to_string().contains("happy"));
+
+    // ONE undo restores the original text.
+    app.execute(Cmd::Undo);
+    assert!(
+        app.buf.rope.to_string().contains("happy"),
+        "after undo: {}",
+        app.buf.rope.to_string()
+    );
+}
+
+#[test]
+fn define_surfaces_definition() {
+    // R10.2: definition lookup shows a definition for a known word.
+    let (_dir, _source, mut app) = test_app("lookup-def", "abandon ship\n");
+    app.set_cursor(3); // inside "abandon"
+
+    app.execute(Cmd::Define);
+    match &app.mode {
+        Mode::Lookup {
+            word, definition, ..
+        } => {
+            assert_eq!(word, "abandon");
+            assert!(!definition.is_empty(), "expected a definition");
+            assert!(
+                definition.to_lowercase().contains("give up"),
+                "got {definition}"
+            );
+        }
+        _ => panic!("expected Lookup mode"),
+    }
+}
+
+#[test]
+fn unknown_word_posts_status_without_opening_overlay() {
+    // R10.1/R10.2: a miss on an unknown word posts a "no entry" status, no overlay.
+    let (_dir, _source, mut app) = test_app("lookup-miss", "zznotaword\n");
+    app.set_cursor(3);
+
+    app.execute(Cmd::Thesaurus);
+    assert!(matches!(app.mode, Mode::Normal), "overlay must not open");
+    assert!(
+        app.status_msg
+            .as_deref()
+            .unwrap()
+            .to_lowercase()
+            .contains("no"),
+        "got {:?}",
+        app.status_msg
+    );
+}
+
+#[test]
+fn autocorrect_fires_on_separator_and_one_undo_restores_typed_text() {
+    // R10.4, R10.5: typing "teh " corrects to "the "; one undo restores "teh ".
+    let (_dir, _source, mut app) = test_app("ac-basic", "");
+
+    // Type "teh" then space via handle_key in Normal mode.
+    for c in "teh".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    // The buffer should be "teh" before the separator.
+    assert_eq!(app.buf.rope.to_string(), "teh");
+
+    // Typing space triggers autocorrect.
+    app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    assert_eq!(
+        app.buf.rope.to_string(),
+        "the ",
+        "autocorrect should fire on space"
+    );
+
+    // R10.5: ONE undo immediately after the substitution restores exactly the
+    // text the writer typed — the misspelled word AND the separator.
+    app.execute(Cmd::Undo);
+    assert_eq!(
+        app.buf.rope.to_string(),
+        "teh ",
+        "one undo should restore the typed text (misspelling + separator)"
+    );
+}
+
+#[test]
+fn smart_typography_curly_quotes_em_dash_ellipsis() {
+    // R10.6: typing straight quotes → curly, -- → em dash, ... → ellipsis.
+    let (_dir, _source, mut app) = test_app("typo-smart", "");
+
+    // Curly double quotes.
+    for c in "\"hi\"".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert_eq!(
+        app.buf.rope.to_string(),
+        "\u{201C}hi\u{201D}",
+        "straight quotes should become curly"
+    );
+
+    // Each quote substitution is one undo (the open quote, "h", "i", close quote).
+    // Undo the close quote.
+    app.execute(Cmd::Undo);
+    // The close-quote was replaced with the glyph as one edit; undoing it
+    // removes that glyph.
+    let text = app.buf.rope.to_string();
+    assert!(
+        !text.ends_with('\u{201D}'),
+        "undo should revert the curly close quote"
+    );
+
+    // Start fresh for em-dash test.
+    let (_dir2, _source2, mut app2) = test_app("typo-dash", "wait");
+    app2.set_cursor(4);
+    for c in "--stop".chars() {
+        app2.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert_eq!(
+        app2.buf.rope.to_string(),
+        "wait\u{2014}stop",
+        "double hyphen should become em dash"
+    );
+
+    // Start fresh for ellipsis test.
+    let (_dir3, _source3, mut app3) = test_app("typo-ellipsis", "er");
+    app3.set_cursor(2);
+    for c in "...um".chars() {
+        app3.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert_eq!(
+        app3.buf.rope.to_string(),
+        "er\u{2026}um",
+        "triple period should become ellipsis"
+    );
+}
+
+#[test]
+fn smart_typography_respects_config_flag() {
+    // R10.6: smart typography is independently toggleable.
+    let (_dir, _source, mut app) = test_app("typo-off", "");
+    app.smart_typography = false;
+
+    for c in "\"hi\"".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert_eq!(
+        app.buf.rope.to_string(),
+        "\"hi\"",
+        "with flag off, no curly conversion"
+    );
+}
+
+#[test]
+fn autocorrect_respects_config_flag() {
+    // R10.4: autocorrect is globally disable-able.
+    let (_dir, _source, mut app) = test_app("ac-off", "");
+    app.autocorrect = None; // feature disabled
+
+    for c in "teh ".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert_eq!(
+        app.buf.rope.to_string(),
+        "teh ",
+        "with autocorrect disabled, no correction"
+    );
+}
+
+#[test]
+fn unavailable_lookup_posts_status_and_does_not_open_overlay() {
+    // R10.7: if the lookup resource is unavailable, post a non-blocking message.
+    let (_dir, _source, mut app) = test_app("lookup-unavail", "hello world\n");
+    app.set_cursor(2);
+    // Force the resource to be Unavailable.
+    app.lookup = lookup::LookupResource::from_str("");
+
+    app.execute(Cmd::Thesaurus);
+    assert!(matches!(app.mode, Mode::Normal), "overlay must not open");
+    assert!(
+        app.status_msg
+            .as_deref()
+            .unwrap()
+            .contains("unavailable"),
+        "got {:?}",
+        app.status_msg
+    );
+}
