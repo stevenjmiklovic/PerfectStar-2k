@@ -27,3 +27,6 @@
 __pycache__/
 .claude/agents/*
 .kiro/*
+
+# Kiro MCP Manager - Sensitive configuration files
+.kiro/settings/
