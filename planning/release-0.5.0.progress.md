@@ -2,19 +2,19 @@
 
 ## Status
 
-In progress
+Complete
 
 ## Last Completed Step
 
-Created persistent release planning files and confirmed the current package version, changelog head, branch, repository, and GitHub authentication.
+Created and pushed the annotated `v0.5.0` tag and published the non-draft, non-prerelease GitHub release at https://github.com/stevenjmiklovic/PerfectStar-2k/releases/tag/v0.5.0.
 
 ## Next Action
 
-Inspect release history, tags, changelog fragments, and repository conventions, then determine the exact v0.5.0 release contents.
+None — v0.5.0 is released.
 
 ## Blockers
 
-- None currently.
+- None.
 
 ## Significant Step
 

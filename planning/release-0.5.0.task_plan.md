@@ -14,7 +14,7 @@ Inspect the repository's existing SemVer/changelog conventions and release tooli
 - [ ] 2. Apply the release-manager workflow and determine the exact release contents.
 - [x] 3. Update Cargo.toml, Cargo.lock if needed, CHANGELOG.md, and release fragments as required.
 - [x] 4. Run formatting, tests, clippy, build, and final diff/release checks.
-- [ ] 5. Create the v0.5.0 tag and publish the GitHub release.
+- [x] 5. Create the v0.5.0 tag and publish the GitHub release.
 
 ## Out of Scope
 
