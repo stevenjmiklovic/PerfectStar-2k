@@ -142,6 +142,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if matches!(app.mode, Mode::Annotations { .. }) {
         draw_annotations(frame, app, text_area);
     }
+    if matches!(app.mode, Mode::ExportMenu { .. }) {
+        draw_export_menu(frame, app, text_area);
+    }
     let active_slot = pane_ids.iter().position(|&p| p == app.active).unwrap_or(0);
     place_cursor(frame, app, pane_areas[active_slot]);
 }
@@ -598,12 +601,25 @@ fn status_left(app: &App) -> String {
             ),
         },
         Mode::Stats => String::from(" Writing Stats · press any key to close"),
-        Mode::ProjectSearch { query, results, .. } => {
-            format!(
-                " Project search: \"{}\" — {} match(es) · ↑↓ navigate · Enter open · Esc close",
-                query,
-                results.len()
-            )
+        Mode::ProjectSearch {
+            query,
+            results,
+            replace_with,
+            ..
+        } => {
+            if replace_with.is_some() {
+                format!(
+                    " Project replace: \"{}\" — {} left · ↑↓ move · Y replace · N skip · A all · Q quit",
+                    query,
+                    results.len()
+                )
+            } else {
+                format!(
+                    " Project search: \"{}\" — {} match(es) · ↑↓ navigate · Enter open · Esc close",
+                    query,
+                    results.len()
+                )
+            }
         }
         Mode::Revisions { entries, .. } => match &app.status_msg {
             Some(msg) => format!(" {msg}"),
@@ -626,7 +642,20 @@ fn status_left(app: &App) -> String {
                 entries.len()
             ),
         },
-        Mode::Normal => match app.status_msg.as_deref().or_else(|| app.sprint_banner()) {
+        // The R7.8 "unavailable format" notice (a status_msg) wins over the
+        // nav hint so the writer sees why a format is missing from the list.
+        Mode::ExportMenu { .. } => match &app.status_msg {
+            Some(msg) => format!(" {msg}"),
+            None => String::from(" ↑↓ select · Enter choose format · Esc close"),
+        },
+        // The goal-reached banner (R2.4) wins over any transient message while
+        // it is fresh: it is time-bounded, must not be dismissed, and must
+        // survive the keystroke that reached the goal.
+        Mode::Normal => match app
+            .goal_banner()
+            .or(app.status_msg.as_deref())
+            .or_else(|| app.sprint_banner())
+        {
             Some(msg) => format!(" {msg}"),
             // With no message to show, a comment under the cursor is what the
             // writer most wants there (R9.2's dimmed panel, without new chrome).
@@ -659,7 +688,11 @@ fn sprint_chip(app: &App) -> Option<String> {
 /// mid-sentence doesn't reflow the page under the cursor.
 fn draw_focus_status(frame: &mut Frame, app: &App, area: Rect) {
     let left = match &app.mode {
-        Mode::Normal => match app.status_msg.as_deref().or_else(|| app.sprint_banner()) {
+        Mode::Normal => match app
+            .goal_banner()
+            .or(app.status_msg.as_deref())
+            .or_else(|| app.sprint_banner())
+        {
             Some(msg) => format!(" {msg}"),
             None => String::new(),
         },
@@ -706,8 +739,17 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let rec = if app.recording { "● REC  " } else { "" };
     let ins = if app.overtype { "Ovr" } else { "Ins" };
 
-    let words_part = if app.show_word_count {
-        format!("  {} words", app.doc_stats.words)
+    // Word/character counts (R2.1): the current document's live prose count,
+    // and — when a project is open — the whole-project total. Shown while the
+    // always-on display is enabled or an on-demand reveal is still fresh.
+    let words_part = if app.counts_visible() {
+        match app.project_words {
+            Some(project_words) => format!(
+                "  {}w/{}c  proj {project_words}w",
+                app.doc_stats.words, app.doc_stats.chars
+            ),
+            None => format!("  {}w/{}c", app.doc_stats.words, app.doc_stats.chars),
+        }
     } else {
         String::new()
     };
@@ -1088,13 +1130,25 @@ fn draw_binder(frame: &mut Frame, app: &App, text_area: Rect) {
     );
 }
 
+/// Clip a string to at most `max` chars, marking the cut with an ellipsis so a
+/// truncated column reads as "there's more" rather than as the whole value.
+fn clip(mut s: String, max: usize) -> String {
+    if s.chars().count() > max {
+        s = s.chars().take(max.saturating_sub(1)).collect();
+        s.push('…');
+    }
+    s
+}
+
 /// Every comment in the document (^PL, R9.4).
 fn draw_annotations(frame: &mut Frame, app: &App, text_area: Rect) {
     let Mode::Annotations { entries, selected } = &app.mode else {
         return;
     };
 
-    let width = (text_area.width.saturating_sub(4)).clamp(40, 72);
+    // Wide enough for the anchored-text (40) + body (60) + doc-name columns of
+    // R9.4, but never wider than the text area it floats over.
+    let width = (text_area.width.saturating_sub(4)).clamp(40, 120);
     let max_list = (text_area.height as usize).saturating_sub(4).clamp(3, 16);
     let height = (entries.len().clamp(1, max_list) + 2) as u16;
     let area = Rect {
@@ -1106,25 +1160,31 @@ fn draw_annotations(frame: &mut Frame, app: &App, text_area: Rect) {
 
     let visible = (area.height as usize).saturating_sub(2);
     let first = selected.saturating_sub(visible.saturating_sub(1));
-    let inner = area.width.saturating_sub(2) as usize;
     let mut lines: Vec<Line> = Vec::new();
 
+    // R9.4: each entry names the anchored text (first 40 chars), the comment
+    // body (first 60), and the document it lives in.
+    let doc = app.buf.file_name();
+
     for (i, annotation) in entries.iter().enumerate().skip(first).take(visible) {
-        // An orphan says so rather than pointing at a line it no longer marks.
-        let place = if annotation.orphaned {
-            String::from("orphaned")
-        } else {
+        // The anchored text, read back from the buffer. An orphan says so
+        // instead — its text is gone — and a point annotation names the line it
+        // sits on, since it marks a place rather than a stretch of prose.
+        let anchored = if annotation.orphaned {
+            String::from("‹orphaned›")
+        } else if annotation.len == 0 {
             format!(
                 "Ln {}",
                 app.buf.line_of(annotation.anchor.min(app.buf.len_chars())) + 1
             )
+        } else {
+            let start = annotation.anchor.min(app.buf.len_chars());
+            let end = annotation.end().min(app.buf.len_chars());
+            let raw: String = app.buf.rope.slice(start..end).to_string();
+            clip(raw.split_whitespace().collect::<Vec<_>>().join(" "), 40)
         };
-        let room = inner.saturating_sub(place.len() + 4);
-        let mut text: String = annotation.text.chars().take(room).collect();
-        if annotation.text.chars().count() > room {
-            text.push('…');
-        }
-        let row = format!(" {place:>10}  {text}");
+        let body = clip(annotation.text.clone(), 60);
+        let row = format!(" {anchored:<41}  {body:<61}  {doc}");
         let style = if i == *selected {
             app.theme.block
         } else if annotation.orphaned {
@@ -1142,6 +1202,53 @@ fn draw_annotations(frame: &mut Frame, app: &App, text_area: Rect) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .title(" Comments ")
+                .style(app.theme.status),
+        ),
+        area,
+    );
+}
+
+/// The unified export format picker (^KF, R7.2): the available targets, one per
+/// row. Selecting one drops into the output-path prompt. Formats whose
+/// dependency is unbundled are already omitted by the caller (R7.8).
+fn draw_export_menu(frame: &mut Frame, app: &App, text_area: Rect) {
+    let Mode::ExportMenu { entries, selected } = &app.mode else {
+        return;
+    };
+
+    let width = (text_area.width.saturating_sub(8)).clamp(24, 40);
+    let max_list = (text_area.height as usize).saturating_sub(4).clamp(3, 8);
+    let height = (entries.len().clamp(1, max_list) + 2) as u16;
+    let area = Rect {
+        x: text_area.x + (text_area.width.saturating_sub(width)) / 2,
+        y: text_area.y + 1,
+        width,
+        height: height.min(text_area.height),
+    };
+
+    let scope = if app.project.is_some() {
+        " project"
+    } else {
+        " document"
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, target) in entries.iter().enumerate() {
+        let row = format!(" {}", target.label());
+        if i == *selected {
+            lines.push(Line::from(Span::styled(row, app.theme.block)));
+        } else {
+            lines.push(Line::from(row));
+        }
+    }
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).style(app.theme.status).block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(format!(" Export{scope} "))
                 .style(app.theme.status),
         ),
         area,
@@ -1284,7 +1391,7 @@ fn draw_project_search(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let title = if replace_with.is_some() {
-        " Project Replace (^R replace · ^A all · Esc cancel) "
+        " Project Replace (Y replace · N skip · A all · Q quit) "
     } else {
         " Project Search (Enter open · Esc close) "
     };
@@ -1769,8 +1876,10 @@ mod tests {
 
         let screen = screen(&mut app).join("\n");
         assert!(screen.contains("Comments"), "{screen}");
+        // R9.4: a len>0 annotation lists its anchored text, not a line number —
+        // the anchor at 4, len 3 in "one\ntwo\nthree\n" covers "two".
         assert!(
-            screen.contains("Ln 2") && screen.contains("about two"),
+            screen.contains("two") && screen.contains("about two"),
             "{screen}"
         );
         assert!(screen.contains("orphaned"), "{screen}");

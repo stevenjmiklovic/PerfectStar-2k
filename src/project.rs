@@ -91,6 +91,29 @@ fn default_true() -> bool {
     true
 }
 
+/// The trimmed text of a document's first Markdown heading, if it has one.
+///
+/// Reads the file line by line and stops at the first heading, so a large
+/// manuscript is not fully loaded just to name a binder row. Returns `None`
+/// when the file is missing, unreadable, or contains no heading — the caller
+/// then falls back to the filename-derived title (R1.2).
+fn first_heading(path: &Path) -> Option<String> {
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines() {
+        let line = line.ok()?;
+        if let Some((_level, title)) = crate::markdown::heading_level(&line) {
+            let title = title.trim();
+            if !title.is_empty() {
+                return Some(title.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// The project manifest: everything `pstar` knows about a multi-file book.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectManifest {
@@ -305,6 +328,20 @@ impl Project {
         CompileResult { text, skipped }
     }
 
+    /// The title to show for a document in the binder (R1.2): the document's
+    /// first Markdown heading if it has one, otherwise the manifest title
+    /// (which defaults to the file stem). Missing or unreadable files fall back
+    /// to the manifest title so the binder still names the entry.
+    ///
+    /// This reads only the file's first non-empty content, so it stays cheap
+    /// enough to call while building the binder rows.
+    pub fn doc_title(&self, idx: usize) -> String {
+        let Some(entry) = self.manifest.docs.get(idx) else {
+            return String::new();
+        };
+        first_heading(&entry.path).unwrap_or_else(|| entry.title.clone())
+    }
+
     /// Get the word count for a document. Returns None if the file doesn't exist
     /// or can't be loaded. Used by the binder panel (task 1.3).
     ///
@@ -322,6 +359,32 @@ impl Project {
             Ok(buf) => Some(buf.word_count()),
             Err(_) => None,
         }
+    }
+
+    /// Prose word count for the whole project (R2.1): the sum of every readable
+    /// document's prose words, counted the same way the status bar and exporter
+    /// count them — `..` note lines and Markdown markers excluded (R2.7).
+    ///
+    /// Missing or unreadable docs contribute zero rather than aborting the sum,
+    /// mirroring the binder's "missing" tolerance (R1.7). This reads files from
+    /// disk, so callers cache the result rather than recomputing it per frame
+    /// (C6); the active document's live count is layered on top by the caller.
+    pub fn total_prose_words(&self) -> usize {
+        self.manifest
+            .docs
+            .iter()
+            .map(|entry| prose_words_in_file(&entry.path))
+            .sum()
+    }
+}
+
+/// Count prose words in a file on disk, returning 0 if it can't be read. Uses
+/// the same per-line prose counting as the live document statistics so the
+/// project total agrees with the per-document count (R2.1, R2.7).
+fn prose_words_in_file(path: &Path) -> usize {
+    match std::fs::read_to_string(path) {
+        Ok(text) => text.lines().map(crate::stats::prose_words_in_line).sum(),
+        Err(_) => 0,
     }
 }
 
@@ -613,6 +676,126 @@ mod tests {
 
         let wc = project.doc_word_count(0);
         assert_eq!(wc, None); // Out of bounds returns None
+    }
+
+    #[test]
+    fn doc_title_prefers_first_heading() {
+        // R1.2: the binder title is the document's first Markdown heading when
+        // present, otherwise the manifest title (file stem), otherwise falls
+        // back gracefully for a missing file.
+        let dir = scratch("doc-title");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let with_heading = dir.join("ch1.md");
+        std::fs::write(&with_heading, "\n\n## The Long Road\n\nProse here.").unwrap();
+        let no_heading = dir.join("ch2.md");
+        std::fs::write(&no_heading, "Just prose, no heading.").unwrap();
+        let missing = dir.join("ch3.md");
+
+        let project = Project {
+            manifest_path: dir.join("test.pstarproj"),
+            manifest: ProjectManifest {
+                name: "Test".to_string(),
+                docs: vec![
+                    DocEntry {
+                        path: with_heading,
+                        title: "ch1".to_string(),
+                        include_in_compile: true,
+                        role: DocRole::Manuscript,
+                    },
+                    DocEntry {
+                        path: no_heading,
+                        title: "ch2".to_string(),
+                        include_in_compile: true,
+                        role: DocRole::Manuscript,
+                    },
+                    DocEntry {
+                        path: missing,
+                        title: "ch3".to_string(),
+                        include_in_compile: true,
+                        role: DocRole::Manuscript,
+                    },
+                ],
+                separator: Separator::PageBreak,
+            },
+        };
+
+        // First heading wins over the stored file-stem title.
+        assert_eq!(project.doc_title(0), "The Long Road");
+        // No heading: fall back to the manifest title (file stem).
+        assert_eq!(project.doc_title(1), "ch2");
+        // Missing file: fall back to the manifest title, never panics.
+        assert_eq!(project.doc_title(2), "ch3");
+        // Out of range: empty string.
+        assert_eq!(project.doc_title(9), "");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn total_prose_words_sums_readable_docs_and_strips_prose() {
+        let dir = scratch("total-prose");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let doc1 = dir.join("doc1.md");
+        // Heading marker + emphasis markers are stripped; note line excluded.
+        std::fs::write(
+            &doc1,
+            "# Chapter One\n.. a private note\nHello **world**.\n",
+        )
+        .unwrap();
+        let doc2 = dir.join("doc2.md");
+        std::fs::write(&doc2, "Three plain words here now\n").unwrap();
+        let missing = dir.join("gone.md");
+
+        let project = Project {
+            manifest_path: dir.join("test.pstarproj"),
+            manifest: ProjectManifest {
+                name: "Test".to_string(),
+                docs: vec![
+                    DocEntry {
+                        path: doc1,
+                        title: "Doc 1".to_string(),
+                        include_in_compile: true,
+                        role: DocRole::Manuscript,
+                    },
+                    DocEntry {
+                        path: doc2,
+                        title: "Doc 2".to_string(),
+                        include_in_compile: true,
+                        role: DocRole::Manuscript,
+                    },
+                    DocEntry {
+                        path: missing,
+                        title: "Missing".to_string(),
+                        include_in_compile: true,
+                        role: DocRole::Manuscript,
+                    },
+                ],
+                separator: Separator::PageBreak,
+            },
+        };
+
+        // doc1: "Chapter One" (2) + "Hello world." (2) = 4, note line excluded.
+        // doc2: 5. missing: 0. Total = 9.
+        assert_eq!(project.total_prose_words(), 9);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn total_prose_words_is_zero_for_empty_project() {
+        let project = Project {
+            manifest_path: PathBuf::from("/tmp/empty.pstarproj"),
+            manifest: ProjectManifest {
+                name: "Empty".to_string(),
+                docs: vec![],
+                separator: Separator::PageBreak,
+            },
+        };
+        assert_eq!(project.total_prose_words(), 0);
     }
 
     #[test]

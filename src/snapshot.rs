@@ -51,6 +51,11 @@ const COUNTER_MARK: char = '~';
 /// ("before the cut"), not prose; capping keeps paths well inside every
 /// filesystem's limit while leaving the full label intact in the index.
 const MAX_LABEL_SLUG: usize = 48;
+/// Longest label the index keeps and the revisions list shows (R4.1: "labels of
+/// up to 80 characters"). Enforced here — the single point every capture funnels
+/// through — so the cap holds no matter which command or caller supplies the
+/// label, and a pasted paragraph can't blow out the revisions-list layout.
+const MAX_LABEL_CHARS: usize = 80;
 /// Filename slug marking an automatic snapshot. It's in the name, not just the
 /// index, so retention still knows which versions it may prune after a lost
 /// index — and so a writer browsing the directory can tell the machine's copies
@@ -218,7 +223,7 @@ impl SnapshotStore {
             label: label
                 .map(str::trim)
                 .filter(|l| !l.is_empty())
-                .map(str::to_owned),
+                .map(cap_label),
             timestamp: millis / 1_000,
             words: prose_words_in_rope(rope),
             auto,
@@ -427,6 +432,16 @@ fn adopt(name: &str, path: &Path) -> SnapshotEntry {
         timestamp,
         words,
         auto,
+    }
+}
+
+/// Hold a label to its documented ceiling (R4.1). Counts by `char` so a label
+/// of multi-byte glyphs is capped by what the writer sees, not by bytes, and
+/// only allocates when the label actually overruns.
+fn cap_label(label: &str) -> String {
+    match label.char_indices().nth(MAX_LABEL_CHARS) {
+        Some((byte, _)) => label[..byte].trim_end().to_owned(),
+        None => label.to_owned(),
     }
 }
 
@@ -640,6 +655,34 @@ mod tests {
         let long = slugify(&"word ".repeat(40));
         assert!(long.chars().count() <= MAX_LABEL_SLUG, "{long}");
         assert!(!long.ends_with('-'), "{long}");
+    }
+
+    #[test]
+    fn stored_label_is_capped_at_the_documented_ceiling() {
+        // R4.1: labels are "up to 80 characters". A short one is kept verbatim.
+        assert_eq!(cap_label("before the cut"), "before the cut");
+        // An over-long label is held to the cap, counted by character not byte,
+        // and never left with dangling trailing whitespace at the cut point.
+        let over = "x".repeat(200);
+        assert_eq!(cap_label(&over).chars().count(), MAX_LABEL_CHARS);
+        // A multi-byte label is capped by glyph count, not byte count.
+        let multibyte = "日".repeat(200);
+        assert_eq!(cap_label(&multibyte).chars().count(), MAX_LABEL_CHARS);
+
+        // And it holds through an actual capture, so the revisions list and the
+        // index can never carry an over-long label (R4.1, R4.3).
+        let dir = scratch_dir("label-cap");
+        let mut store = SnapshotStore::in_dir(dir.clone());
+        let entry = store
+            .capture(&Rope::from_str("text\n"), Some(&"word ".repeat(40)))
+            .unwrap();
+        assert!(
+            entry.label.as_deref().unwrap().chars().count() <= MAX_LABEL_CHARS,
+            "{:?}",
+            entry.label
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -228,6 +228,17 @@ impl Journal {
         }
     }
 
+    /// Whether this pane can journal at all this session.
+    ///
+    /// A journal has no path when the platform exposed no state/data directory
+    /// (`paths::recovery()` returned `None`). In that case every
+    /// [`write_if_changed`](Self::write_if_changed) is a silent no-op, so the
+    /// UI must tell the writer crash recovery is unavailable for the session
+    /// (R11.7) rather than let them assume their work is protected.
+    pub fn is_available(&self) -> bool {
+        self.path.is_some()
+    }
+
     /// Load a recovery record only when it is newer than the manuscript.
     ///
     /// Missing records are ordinary. Stale records are removed so they cannot
@@ -294,6 +305,15 @@ impl Journal {
         }
         self.last_written_edit = None;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unavailable() -> Self {
+        Self {
+            path: None,
+            source: None,
+            last_written_edit: None,
+        }
     }
 
     #[cfg(test)]

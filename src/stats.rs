@@ -9,7 +9,6 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
@@ -170,36 +169,89 @@ pub fn count_slice(rope: &Rope, from: usize, to: usize) -> (usize, usize) {
 // --- Session goals -----------------------------------------------------------
 
 /// What kind of session target the writer set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GoalKind {
     Words,
-    #[allow(dead_code)] // Used by Phase 8 (sprints/timers).
     Minutes,
 }
 
-/// A running session goal.
+/// Session-goal bounds (R2.3). A word goal is 1..=1,000,000 words; a time goal
+/// is 1..=480 minutes. Enforced at the point the goal is set so a fat-fingered
+/// entry cannot create an unreachable or nonsensical target.
+pub const MAX_WORD_GOAL: usize = 1_000_000;
+pub const MAX_MINUTE_GOAL: usize = 480;
+
+/// Now, as whole seconds since the Unix epoch. The goal's start time is stored
+/// on this clock (not a monotonic `Instant`) so that time-goal progress resumes
+/// correctly after the process restarts (R2.5).
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// A running session goal. `start_unix` anchors time-goal progress to the wall
+/// clock so it survives a restart; `started` is kept for any in-process elapsed
+/// use but is not authoritative across restarts.
 #[derive(Debug, Clone)]
 pub struct SessionGoal {
     pub kind: GoalKind,
     pub target: usize,
     pub start_words: usize,
-    pub started: Instant,
+    /// Wall-clock start (Unix seconds) — the persisted, restart-safe anchor
+    /// for time-goal progress (survives a process restart, R2.5).
+    pub start_unix: u64,
     pub reached: bool,
 }
 
+/// The persisted shape of a session goal, stored beside the daily history in
+/// `stats/` so reopening the same document resumes progress (R2.5). Only the
+/// wall-clock fields survive; the monotonic `Instant` is rebuilt on load.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GoalFile {
+    kind: GoalKind,
+    target: usize,
+    baseline: usize,
+    start_unix: u64,
+    #[serde(default)]
+    reached: bool,
+}
+
 impl SessionGoal {
+    /// Validate a word goal against its bounds (R2.3), returning the target or
+    /// an explanation of why it was rejected.
+    pub fn validate_words(target: usize) -> Result<usize, String> {
+        match target {
+            0 => Err(String::from("Enter a positive number of words")),
+            n if n > MAX_WORD_GOAL => Err(format!("Word goal must be at most {MAX_WORD_GOAL}")),
+            n => Ok(n),
+        }
+    }
+
+    /// Validate a minute goal against its bounds (R2.3).
+    pub fn validate_minutes(target: usize) -> Result<usize, String> {
+        match target {
+            0 => Err(String::from("Enter a positive number of minutes")),
+            n if n > MAX_MINUTE_GOAL => Err(format!(
+                "Time goal must be at most {MAX_MINUTE_GOAL} minutes"
+            )),
+            n => Ok(n),
+        }
+    }
+
     pub fn new(kind: GoalKind, target: usize, current_words: usize) -> Self {
         SessionGoal {
             kind,
             target,
             start_words: current_words,
-            started: Instant::now(),
+            start_unix: now_unix(),
             reached: false,
         }
     }
 
-    /// Progress as (current, target). Returns None if the goal is time-based
-    /// and the elapsed check is more appropriate.
+    /// Progress as (current, target). Word goals report net words since the
+    /// baseline; time goals report elapsed whole minutes on the wall clock.
     pub fn progress(&self, current_words: usize) -> (usize, usize) {
         match self.kind {
             GoalKind::Words => {
@@ -207,7 +259,7 @@ impl SessionGoal {
                 (written, self.target)
             }
             GoalKind::Minutes => {
-                let elapsed = self.started.elapsed().as_secs() / 60;
+                let elapsed = now_unix().saturating_sub(self.start_unix) / 60;
                 (elapsed as usize, self.target)
             }
         }
@@ -217,6 +269,61 @@ impl SessionGoal {
     pub fn is_met(&self, current_words: usize) -> bool {
         let (current, target) = self.progress(current_words);
         current >= target
+    }
+
+    /// Persist the goal beside the given document's history so it resumes on
+    /// reopen (R2.5). A missing stats root or path is a silent no-op — a goal
+    /// that cannot be saved is not worth refusing an edit over.
+    pub fn save_for(&self, file_path: Option<&Path>) {
+        self.save_in(crate::paths::stats(), file_path);
+    }
+
+    fn save_in(&self, root: Option<PathBuf>, file_path: Option<&Path>) {
+        let Some(path) = goal_path(root, file_path) else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let file = GoalFile {
+            kind: self.kind,
+            target: self.target,
+            baseline: self.start_words,
+            start_unix: self.start_unix,
+            reached: self.reached,
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&file) {
+            let _ = crate::paths::write_atomic(&path, json.as_bytes());
+        }
+    }
+
+    /// Load a persisted goal for the given document, if one is active (R2.5).
+    pub fn load_for(file_path: Option<&Path>) -> Option<Self> {
+        Self::load_in(crate::paths::stats(), file_path)
+    }
+
+    fn load_in(root: Option<PathBuf>, file_path: Option<&Path>) -> Option<Self> {
+        let path = goal_path(root, file_path)?;
+        let data = std::fs::read_to_string(path).ok()?;
+        let file: GoalFile = serde_json::from_str(&data).ok()?;
+        Some(SessionGoal {
+            kind: file.kind,
+            target: file.target,
+            start_words: file.baseline,
+            start_unix: file.start_unix,
+            reached: file.reached,
+        })
+    }
+}
+
+/// The on-disk location of a document's persisted goal: `stats/<key>-goal.json`.
+fn goal_path(root: Option<PathBuf>, file_path: Option<&Path>) -> Option<PathBuf> {
+    match (root, file_path) {
+        (Some(dir), Some(fp)) => {
+            let key = crate::paths::path_key(fp);
+            Some(dir.join(format!("{key}-goal.json")))
+        }
+        _ => None,
     }
 }
 
@@ -467,6 +574,72 @@ mod tests {
         let (progress, target) = goal.progress(120);
         assert_eq!(progress, 70);
         assert_eq!(target, 100);
+    }
+
+    #[test]
+    fn word_goal_bounds_are_enforced() {
+        assert!(SessionGoal::validate_words(0).is_err());
+        assert_eq!(SessionGoal::validate_words(1), Ok(1));
+        assert_eq!(
+            SessionGoal::validate_words(MAX_WORD_GOAL),
+            Ok(MAX_WORD_GOAL)
+        );
+        assert!(SessionGoal::validate_words(MAX_WORD_GOAL + 1).is_err());
+    }
+
+    #[test]
+    fn minute_goal_bounds_are_enforced() {
+        assert!(SessionGoal::validate_minutes(0).is_err());
+        assert_eq!(SessionGoal::validate_minutes(1), Ok(1));
+        assert_eq!(
+            SessionGoal::validate_minutes(MAX_MINUTE_GOAL),
+            Ok(MAX_MINUTE_GOAL)
+        );
+        assert!(SessionGoal::validate_minutes(MAX_MINUTE_GOAL + 1).is_err());
+    }
+
+    #[test]
+    fn minute_goal_progress_reads_the_wall_clock() {
+        // A goal started 90 seconds ago should read one whole elapsed minute,
+        // independently of any word count.
+        let mut goal = SessionGoal::new(GoalKind::Minutes, 30, 0);
+        goal.start_unix = goal.start_unix.saturating_sub(90);
+        let (elapsed, target) = goal.progress(0);
+        assert_eq!(elapsed, 1);
+        assert_eq!(target, 30);
+        assert!(!goal.is_met(0));
+    }
+
+    #[test]
+    fn session_goal_round_trips_target_baseline_and_start() {
+        let dir = std::env::temp_dir().join(format!("pstar-goal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let doc = dir.join("chapter.md");
+
+        // A word goal set with the writer 120 words in.
+        let mut goal = SessionGoal::new(GoalKind::Words, 500, 120);
+        goal.reached = false;
+        goal.save_in(Some(dir.clone()), Some(&doc));
+
+        let reloaded =
+            SessionGoal::load_in(Some(dir.clone()), Some(&doc)).expect("a saved goal reloads");
+        assert_eq!(reloaded.kind, GoalKind::Words);
+        assert_eq!(reloaded.target, 500);
+        assert_eq!(reloaded.start_words, 120);
+        assert_eq!(reloaded.start_unix, goal.start_unix);
+        assert!(!reloaded.reached);
+        // Net-words-since-baseline resumes from where it left off.
+        assert_eq!(reloaded.progress(300), (180, 500));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn no_persisted_goal_loads_as_none() {
+        let dir = std::env::temp_dir().join(format!("pstar-goal-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let doc = dir.join("chapter.md");
+        assert!(SessionGoal::load_in(Some(dir), Some(&doc)).is_none());
     }
 
     #[test]

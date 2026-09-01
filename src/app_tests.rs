@@ -396,6 +396,26 @@ fn declining_startup_recovery_keeps_disk_text_and_clears_record() {
 }
 
 #[test]
+fn unavailable_recovery_directory_warns_the_writer_at_startup() {
+    // R11.7: when the state directory is inaccessible the journal has no path
+    // and every write is a silent no-op. Startup must surface a status-bar
+    // warning rather than let the writer assume recovery is protecting them.
+    let mut app = App::new(None).unwrap();
+    app.recovery_journals[0] = Journal::unavailable();
+
+    app.offer_recovery_for_active();
+
+    assert!(!app.recovery_journals[0].is_available());
+    assert_eq!(
+        app.status_msg.as_deref(),
+        Some("Crash recovery unavailable for this session")
+    );
+    // The prompt is only for a genuine recovery offer, never for the
+    // unavailable case (there is nothing to restore).
+    assert!(matches!(app.mode, Mode::Normal));
+}
+
+#[test]
 fn app_project_initializes_as_none() {
     // R1.8: backward compat — app starts with no project when opening
     // a bare file. Task 1.2.
@@ -1497,24 +1517,43 @@ fn meeting_the_word_target_finishes_the_sprint_before_the_clock() {
 }
 
 #[test]
-fn stopping_a_sprint_reports_it_without_filing_it() {
+fn cancelling_a_sprint_records_its_partial_figures() {
+    // R3.3/R3.4: cancelling still *ends* the sprint, so the words written and
+    // elapsed time up to the cancellation point are reported in a non-modal
+    // summary and appended to the session history — just like a sprint that
+    // reached its target, only labelled "stopped".
     let (dir, _source, mut app) = test_app("sprint-stop", "");
     app.execute(Cmd::SprintStart);
     typed(&mut app, "25/500");
     app.handle_key(plain(KeyCode::Enter));
     app.insert_text("a few words here", EditKind::Other);
 
-    // The same chord stops it.
+    // The same chord stops it before either target is reached.
     app.execute(Cmd::SprintStart);
 
     assert!(app.sprint.is_none());
     let msg = app.status_msg.clone().unwrap();
     assert!(msg.contains("Sprint stopped"), "{msg}");
     assert!(msg.contains("4 words"), "{msg}");
-    assert!(
-        app.daily_history.sprints.is_empty(),
-        "R3.2 files sprints that ended, not ones called off"
+
+    // R3.4: the partial figures are recorded, not discarded. A cancelled sprint
+    // did not meet its target.
+    assert_eq!(
+        app.daily_history.sprints.len(),
+        1,
+        "R3.3/R3.4: a cancelled sprint is still filed in history"
     );
+    let record = &app.daily_history.sprints[0];
+    assert_eq!(record.words, 4, "R3.4: words up to cancellation");
+    assert!(!record.met_target, "cancelled before either target");
+
+    // R3.3: the summary outlives the keystroke that would clear an ordinary
+    // status message, so a writer who cancels mid-word still sees it.
+    assert!(
+        app.sprint_banner().is_some_and(|b| b.contains("Sprint stopped")),
+        "the stopped-sprint summary is non-modal and persistent"
+    );
+
     // ...and the prompt is available again for a fresh sprint.
     app.execute(Cmd::SprintStart);
     assert!(matches!(
@@ -1859,6 +1898,46 @@ fn binder_rows_carry_each_documents_synopsis() {
         Mode::Binder { entries, .. } => {
             assert_eq!(entries[0].synopsis, "Marcus finds the knife.");
             assert_eq!(entries[1].synopsis, "", "no sidecar, no secondary line");
+        }
+        _ => panic!("expected the binder"),
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn toggling_synopsis_visibility_hides_and_restores_the_secondary_line() {
+    // R5.3: the binder's synopsis line is toggled visible or hidden via ^PY.
+    let (dir, mut app) = project_with_note("binder-synopsis-toggle");
+    let root = app.meta_root.clone().unwrap();
+    let chapter = app.project.as_ref().unwrap().manifest.docs[0].path.clone();
+    crate::meta::set_synopsis(&root, &chapter, "Marcus finds the knife.").unwrap();
+
+    app.execute(Cmd::BinderToggle);
+    assert!(app.show_synopsis, "synopses are shown by default");
+    match &app.mode {
+        Mode::Binder { entries, .. } => {
+            assert_eq!(entries[0].synopsis, "Marcus finds the knife.")
+        }
+        _ => panic!("expected the binder"),
+    }
+
+    // Hidden: the row keeps its title but drops the secondary line.
+    app.execute(Cmd::ToggleSynopsis);
+    assert!(!app.show_synopsis);
+    match &app.mode {
+        Mode::Binder { entries, .. } => {
+            assert_eq!(entries[0].synopsis, "", "hidden: no secondary line")
+        }
+        _ => panic!("expected the binder to stay open"),
+    }
+
+    // Shown again: the synopsis returns, still read from the sidecar.
+    app.execute(Cmd::ToggleSynopsis);
+    assert!(app.show_synopsis);
+    match &app.mode {
+        Mode::Binder { entries, .. } => {
+            assert_eq!(entries[0].synopsis, "Marcus finds the knife.")
         }
         _ => panic!("expected the binder"),
     }
@@ -2293,4 +2372,548 @@ fn readability_and_overused_words_are_computed_when_the_overlay_opens() {
     assert_eq!(report.readability.sentences, 1);
 
     let _ = std::fs::remove_dir_all(dir);
+}
+
+// --- R2.1: status-bar counts, on-demand toggle, project total ---------------
+
+#[test]
+fn word_count_toggle_flips_always_on_and_flashes_on_demand() {
+    // ^OC toggles the always-on counts. Turning them off still reveals them
+    // on demand for at least COUNT_FLASH, so the writer sees them once (R2.1).
+    let (dir, _source, mut app) = test_app("count-toggle", "one two three\n");
+
+    // Default: always-on, so counts render.
+    assert!(app.show_word_count);
+    assert!(app.counts_visible());
+
+    // ^OC turns the always-on readout off — but the counts flash on demand.
+    app.execute(Cmd::WordCount);
+    assert!(!app.show_word_count);
+    assert!(
+        app.counts_visible(),
+        "counts still show on demand right after toggling off"
+    );
+
+    // ^OC again restores the always-on readout and clears the flash.
+    app.execute(Cmd::WordCount);
+    assert!(app.show_word_count);
+    assert!(app.counts_visible());
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn on_demand_count_flash_lasts_at_least_three_seconds() {
+    // R2.1: an on-demand reveal must persist for at least 3 seconds. The flash
+    // window is measured from the toggle instant; verify the boundary directly.
+    let (dir, _source, mut app) = test_app("count-flash", "words here now\n");
+
+    app.execute(Cmd::WordCount); // always-on -> off, starts the flash
+    assert!(!app.show_word_count);
+    assert!(
+        app.counts_visible(),
+        "the on-demand reveal is visible within its window"
+    );
+    // The flash window is COUNT_FLASH, and R2.1 requires at least 3 seconds.
+    assert!(COUNT_FLASH >= Duration::from_secs(3));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn selection_counts_appear_while_a_block_is_active() {
+    // R2.2: with a block active, the selection's word/char count is available.
+    let (dir, _source, mut app) = test_app("count-selection", "Hello world, this is a test.\n");
+
+    app.blocks.begin = Some(0);
+    app.blocks.end = Some(11); // "Hello world"
+    let (b, e) = app.blocks.range().expect("a block is marked");
+    let (words, chars) = crate::stats::count_slice(&app.buf.rope, b, e);
+    assert_eq!(words, 2);
+    assert_eq!(chars, 11);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn opening_a_project_sums_its_documents_into_the_project_total() {
+    // R2.1: the whole-project word count sums the binder documents. The three
+    // sample docs are three words each -> nine.
+    let (proj_dir, project) = setup_test_project();
+    let mut app = App::new(None).unwrap();
+    assert_eq!(
+        app.project_words, None,
+        "no project total before one is open"
+    );
+
+    app.project = Some(project);
+    app.refresh_project_words();
+    assert_eq!(app.project_words, Some(9));
+
+    let _ = std::fs::remove_dir_all(proj_dir);
+}
+
+// --- R2.3 / R2.4: session goals — bounds, minute goals, reached banner ------
+//
+// These pin the app-level goal wiring that task 2.2 verifies: `^OG` sets a
+// word or time goal with bounds enforced, and a reached goal posts a
+// non-blocking notification that survives the keystroke that reaches it and
+// stays up for at least GOAL_BANNER (R2.4). Persistence of target/baseline/
+// start (R2.5) is covered by the round-trip test in `stats.rs`.
+
+/// Drive the ^OG prompt to completion with the given spec.
+fn set_goal_via_prompt(app: &mut App, spec: &str) {
+    app.execute(Cmd::SetGoal);
+    assert!(
+        matches!(
+            app.mode,
+            Mode::Input {
+                action: InputAction::SetGoal,
+                ..
+            }
+        ),
+        "^OG should open the goal prompt"
+    );
+    typed(app, spec);
+    app.handle_key(plain(KeyCode::Enter));
+}
+
+#[test]
+fn a_bare_number_sets_a_word_goal() {
+    let (dir, _source, mut app) = test_app("goal-words", "one two\n");
+    set_goal_via_prompt(&mut app, "500");
+    let goal = app.goal.as_ref().expect("a word goal is set");
+    assert_eq!(goal.kind, crate::stats::GoalKind::Words);
+    assert_eq!(goal.target, 500);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_minute_suffix_sets_a_time_goal() {
+    let (dir, _source, mut app) = test_app("goal-minutes", "one two\n");
+    set_goal_via_prompt(&mut app, "30m");
+    let goal = app.goal.as_ref().expect("a time goal is set");
+    assert_eq!(goal.kind, crate::stats::GoalKind::Minutes);
+    assert_eq!(goal.target, 30);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn an_out_of_bounds_word_goal_is_rejected() {
+    let (dir, _source, mut app) = test_app("goal-toobig", "one two\n");
+    set_goal_via_prompt(&mut app, "2000000");
+    assert!(app.goal.is_none(), "a goal past the cap is not set");
+    assert!(
+        app.status_msg.as_deref().unwrap().contains("at most"),
+        "{:?}",
+        app.status_msg
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_zero_minute_goal_is_rejected() {
+    let (dir, _source, mut app) = test_app("goal-zero-min", "one two\n");
+    set_goal_via_prompt(&mut app, "0m");
+    assert!(app.goal.is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn reaching_a_goal_posts_a_banner_that_survives_typing() {
+    // R2.4: the goal-reached notification is non-blocking, needs no dismissal,
+    // and stays visible for at least 5 seconds — so the very keystroke that
+    // reaches the goal must not erase it.
+    let (dir, _source, mut app) = test_app("goal-reached", "one two three\n");
+    // A small goal the writer is about to cross.
+    set_goal_via_prompt(&mut app, "2");
+    let start = app.doc_stats.words;
+    app.set_cursor(app.buf.len_chars());
+    app.insert_text("four five six", EditKind::Other);
+    assert!(app.doc_stats.words >= start + 2, "enough words written");
+
+    // The goal check runs on the idle tick.
+    app.maybe_autosave();
+    let banner = app.goal_banner().expect("a reached goal posts a banner");
+    assert!(banner.contains("Goal reached!"), "{banner}");
+    assert!(app.goal.as_ref().unwrap().reached);
+
+    // A further keystroke clears the transient status message but must not
+    // clear the banner — it is timed, not dismissed (R2.4).
+    app.handle_key(plain(KeyCode::Char('x')));
+    assert!(
+        app.goal_banner().is_some(),
+        "the banner survives the next keystroke"
+    );
+
+    // GOAL_BANNER is the visibility floor R2.4 requires.
+    assert!(GOAL_BANNER >= Duration::from_secs(5));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_reached_goal_notifies_only_once() {
+    let (dir, _source, mut app) = test_app("goal-once", "start\n");
+    set_goal_via_prompt(&mut app, "1");
+    app.set_cursor(app.buf.len_chars());
+    app.insert_text("more words here", EditKind::Other);
+    app.maybe_autosave();
+    assert!(app.goal_banner().is_some());
+
+    // Writing further and ticking again must not re-arm the notification.
+    app.goal_banner = None;
+    app.insert_text(" and yet more", EditKind::Other);
+    app.maybe_autosave();
+    assert!(
+        app.goal_banner().is_none(),
+        "the goal-reached notice fires once per goal"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// --- R6: multi-file project search & replace wiring (task 8.1) --------------
+//
+// These exercise the app-level seam between `Mode::ProjectSearch`, the key
+// handler, and the replace/jump helpers — the plumbing that `projsearch.rs`
+// unit tests cannot reach. They pin the behavior that task 8.1 verifies:
+// search-then-jump opens the right doc at the match, per-match Y/N/A/Q
+// confirmation drives replacement, an unopened file is edited into a dirty,
+// unsaved, independently-undoable buffer (R6.4/R6.7), and the in-document
+// ^QF/^L incremental search is not regressed (R6.6).
+
+/// Build an app with a real 3-doc project on disk (each doc mentions "Bob"),
+/// with metadata/backup roots pointed at the temp tree so tests never touch a
+/// writer's real state.
+fn project_app(tag: &str) -> (std::path::PathBuf, App) {
+    let dir = scratch_dir(tag);
+    std::fs::create_dir_all(&dir).unwrap();
+    let doc1 = dir.join("ch1.md");
+    let doc2 = dir.join("ch2.md");
+    let doc3 = dir.join("ch3.md");
+    std::fs::write(&doc1, "Alice met Bob.\nBob smiled at Bob.\n").unwrap();
+    std::fs::write(&doc2, "Bob left town.\n").unwrap();
+    std::fs::write(&doc3, "No mention here.\n").unwrap();
+
+    let manifest_path = dir.join("book.pstarproj");
+    let project = Project {
+        manifest_path: manifest_path.clone(),
+        manifest: crate::project::ProjectManifest {
+            name: "Book".to_string(),
+            docs: vec![
+                crate::project::DocEntry {
+                    path: doc1,
+                    title: "Ch 1".to_string(),
+                    include_in_compile: true,
+                    role: DocRole::Manuscript,
+                },
+                crate::project::DocEntry {
+                    path: doc2,
+                    title: "Ch 2".to_string(),
+                    include_in_compile: true,
+                    role: DocRole::Manuscript,
+                },
+                crate::project::DocEntry {
+                    path: doc3,
+                    title: "Ch 3".to_string(),
+                    include_in_compile: true,
+                    role: DocRole::Manuscript,
+                },
+            ],
+            separator: crate::project::Separator::PageBreak,
+        },
+    };
+    project.save().unwrap();
+
+    let mut app = App::new(None).unwrap();
+    app.project = Some(project);
+    // Keep every write-heavy subsystem inside the temp tree.
+    app.backup_root = Some(dir.join("recovery"));
+    (dir, app)
+}
+
+#[test]
+fn project_search_finds_every_occurrence_and_jump_opens_the_match() {
+    // R6.1/R6.2: search the whole project, then selecting a result opens the
+    // owning document with the cursor at the start of the match.
+    let (dir, mut app) = project_app("projsearch-jump");
+
+    app.run_project_search("Bob", None);
+
+    let (count, first_path, first_pos, second_path, second_pos) = match &app.mode {
+        Mode::ProjectSearch { results, .. } => (
+            results.len(),
+            results[0].path.clone(),
+            results[0].char_pos,
+            results[1].path.clone(),
+            results[1].char_pos,
+        ),
+        _ => panic!("search did not enter ProjectSearch mode"),
+    };
+    // "Bob" x3 in ch1 + x1 in ch2 = 4 matches; ch3 has none.
+    assert_eq!(count, 4);
+
+    // Jump to the second match (still in ch1, at "Bob smiled").
+    app.project_search_jump(1);
+    assert!(matches!(app.mode, Mode::Normal));
+    assert_eq!(app.buf.path.as_deref(), Some(second_path.as_path()));
+    assert_eq!(app.cursor, second_pos);
+    // The opened text under the cursor is the match.
+    let at: String = app.buf.rope.slice(app.cursor..app.cursor + 3).to_string();
+    assert_eq!(at, "Bob");
+
+    // Jumping to the first match reopens ch1 at position 0's "Bob".
+    app.run_project_search("Bob", None);
+    app.project_search_jump(0);
+    assert_eq!(app.buf.path.as_deref(), Some(first_path.as_path()));
+    assert_eq!(app.cursor, first_pos);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn project_replace_confirm_yes_edits_unopened_file_into_a_dirty_unsaved_buffer() {
+    // R6.4/R6.7: confirming a replace opens the (previously unopened) file,
+    // applies the edit as an undoable op, leaves the buffer dirty, and does
+    // NOT persist to disk until the user explicitly saves.
+    let (dir, mut app) = project_app("projreplace-yes");
+    let ch2_on_disk = dir.join("ch2.md");
+    let disk_before = std::fs::read_to_string(&ch2_on_disk).unwrap();
+
+    app.run_project_search("Bob", Some("Rob".to_string()));
+
+    // Select the ch2 match (index 3: ch1 has 3 matches, ch2 has 1) and confirm.
+    if let Mode::ProjectSearch { selected, .. } = &mut app.mode {
+        *selected = 3;
+    }
+    app.handle_project_search_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+    // ch2 is now the active buffer, edited to "Rob left town." and left dirty.
+    assert_eq!(app.buf.path.as_deref(), Some(ch2_on_disk.as_path()));
+    assert!(app.buf.rope.to_string().starts_with("Rob left town."));
+    assert!(app.buf.dirty, "replaced buffer must be dirty (R6.7)");
+    // Disk is untouched — no silent unreviewable write (R6.7).
+    assert_eq!(
+        std::fs::read_to_string(&ch2_on_disk).unwrap(),
+        disk_before,
+        "R6.7: replace must not persist before the user saves"
+    );
+
+    // The edit is independently undoable within this document's log (R6.4).
+    app.execute(Cmd::Undo);
+    assert!(app.buf.rope.to_string().starts_with("Bob left town."));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn project_replace_no_skips_the_match_and_leaves_the_buffer_untouched() {
+    // R6.3: "N" skips the current match without editing anything.
+    let (dir, mut app) = project_app("projreplace-no");
+
+    app.run_project_search("Bob", Some("Rob".to_string()));
+    let before = match &app.mode {
+        Mode::ProjectSearch { results, .. } => results.len(),
+        _ => panic!("not in search mode"),
+    };
+
+    app.handle_project_search_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+    match &app.mode {
+        Mode::ProjectSearch {
+            results, selected, ..
+        } => {
+            // Nothing removed; selection advanced past the skipped match.
+            assert_eq!(results.len(), before);
+            assert_eq!(*selected, 1);
+        }
+        _ => panic!("N should stay in search mode"),
+    }
+    // No file was opened/edited by a skip.
+    assert!(app.buf.path.is_none() || !app.buf.dirty);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn project_replace_all_replaces_every_remaining_match() {
+    // R6.3: "A" replaces all remaining matches and returns to Normal mode.
+    let (dir, mut app) = project_app("projreplace-all");
+
+    app.run_project_search("Bob", Some("Rob".to_string()));
+    app.handle_project_search_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+
+    assert!(matches!(app.mode, Mode::Normal));
+    // A summary is reported.
+    assert!(
+        app.status_msg
+            .as_deref()
+            .map(|m| m.contains("replacement"))
+            .unwrap_or(false),
+        "replace-all should report a summary, got {:?}",
+        app.status_msg
+    );
+
+    // Every "Bob" across the reachable files is now "Rob". The last-touched
+    // file is the active buffer and carries no remaining "Bob".
+    assert!(!app.buf.rope.to_string().contains("Bob"));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn in_document_find_next_is_not_regressed_by_project_search() {
+    // R6.6: the single-file ^QF/^L incremental path still works, including
+    // smartcase literal matching and wrap-around. (The current single-file
+    // search — `Buffer::find` — is literal + smartcase; wildcard expansion is
+    // not implemented in this path, so we verify only the behavior that ships.)
+    let (dir, _source, mut app) = test_app("in-doc-find", "one Bob two bob three\n");
+
+    // Smartcase literal repeat-find (^L uses last_search). A lowercase query
+    // folds case, so it matches both "Bob" and "bob".
+    app.last_search = Some("bob".to_string());
+    app.set_cursor(0);
+    app.execute(Cmd::FindNext);
+    let first = app.cursor;
+    assert_eq!(
+        app.buf
+            .rope
+            .slice(first..first + 3)
+            .to_string()
+            .to_lowercase(),
+        "bob"
+    );
+    app.execute(Cmd::FindNext);
+    assert!(app.cursor > first, "second ^L advances to the next match");
+    let second = app.cursor;
+    assert_eq!(
+        app.buf
+            .rope
+            .slice(second..second + 3)
+            .to_string()
+            .to_lowercase(),
+        "bob"
+    );
+    // A third find wraps back to the first occurrence.
+    app.execute(Cmd::FindNext);
+    assert_eq!(app.cursor, first, "^L wraps to the top");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// --- Phase 7 (R7.2/R7.8): unified export format-selection step ---------------
+
+/// Pull the `InputAction` out of the output-path prompt a menu selection lands
+/// in, or panic if the menu didn't route into `Mode::Input`.
+fn routed_action(app: &App) -> InputAction {
+    match &app.mode {
+        Mode::Input { action, .. } => *action,
+        _ => panic!("expected Mode::Input after routing"),
+    }
+}
+
+/// Drive the menu the way a writer does: select the entry for `target`, then
+/// press Enter. Fails if `target` isn't offered (so a missing format surfaces
+/// as a test failure rather than a silent no-op).
+fn pick_export(app: &mut App, target: export::Target) {
+    let idx = match &app.mode {
+        Mode::ExportMenu { entries, .. } => entries
+            .iter()
+            .position(|t| *t == target)
+            .unwrap_or_else(|| panic!("{target:?} not offered in the export menu")),
+        _ => panic!("expected Mode::ExportMenu"),
+    };
+    if let Mode::ExportMenu { selected, .. } = &mut app.mode {
+        *selected = idx;
+    }
+    app.handle_key(plain(KeyCode::Enter));
+}
+
+#[test]
+fn export_menu_opens_and_lists_all_five_available_formats() {
+    // R7.2/R7.8: ^KF opens the picker, which offers every hand-generated
+    // format (nothing is unbundled today) so all five appear.
+    let (dir, _source, mut app) = test_app("exportmenu-open", "Chapter One\n");
+
+    app.execute(Cmd::ExportMenu);
+
+    let entries = match &app.mode {
+        Mode::ExportMenu { entries, selected } => {
+            assert_eq!(*selected, 0, "menu opens on the first entry");
+            entries.clone()
+        }
+        _ => panic!("^KF did not open the export menu"),
+    };
+    assert_eq!(entries.len(), 5, "all five formats are available today");
+    for t in [
+        export::Target::Rtf,
+        export::Target::Docx,
+        export::Target::Epub,
+        export::Target::Html,
+        export::Target::PlainText,
+    ] {
+        assert!(entries.contains(&t), "{t:?} missing from the export menu");
+    }
+
+    // Toggle semantics: a second ^KF closes the picker.
+    app.execute(Cmd::ExportMenu);
+    assert!(matches!(app.mode, Mode::Normal), "second ^KF closes the menu");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn export_menu_routes_each_format_to_its_single_document_action() {
+    // R7.2: with no project loaded, every format routes to its single-document
+    // export action in the path prompt.
+    for (target, expected) in [
+        (export::Target::PlainText, InputAction::ExportClean),
+        (export::Target::Rtf, InputAction::ExportManuscript),
+        (export::Target::Docx, InputAction::ExportDocx),
+        (export::Target::Epub, InputAction::ExportEpub),
+        (export::Target::Html, InputAction::ExportHtml),
+    ] {
+        let (dir, _source, mut app) = test_app("exportmenu-single", "Chapter One\n");
+        assert!(app.project.is_none(), "single-document case has no project");
+
+        app.execute(Cmd::ExportMenu);
+        pick_export(&mut app, target);
+
+        assert_eq!(
+            routed_action(&app),
+            expected,
+            "{target:?} routed to the wrong single-document action"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn export_menu_routes_rich_formats_to_project_actions_when_a_project_is_loaded() {
+    // R7.2: DOCX/EPUB/HTML compile the book when a project is loaded (matching
+    // the direct ^PD/^PF/^PH chords), while plain text and manuscript RTF stay
+    // single-document even with a project open.
+    for (target, expected) in [
+        (export::Target::Docx, InputAction::ExportProjectDocx),
+        (export::Target::Epub, InputAction::ExportProjectEpub),
+        (export::Target::Html, InputAction::ExportProjectHtml),
+        (export::Target::PlainText, InputAction::ExportClean),
+        (export::Target::Rtf, InputAction::ExportManuscript),
+    ] {
+        let (dir, mut app) = project_app("exportmenu-project");
+        app.splash = false;
+        assert!(app.project.is_some(), "project case has a project loaded");
+
+        app.execute(Cmd::ExportMenu);
+        pick_export(&mut app, target);
+
+        assert_eq!(
+            routed_action(&app),
+            expected,
+            "{target:?} routed to the wrong action with a project loaded"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

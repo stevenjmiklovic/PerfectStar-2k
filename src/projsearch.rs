@@ -139,8 +139,7 @@ fn find_matches_in(
             .position(|&c| c == '\n')
             .map(|p| start + p)
             .unwrap_or(len);
-        let context: String = chars[line_start..line_end].iter().collect();
-        let context = context.trim().to_string();
+        let context = build_context(chars, line_start, line_end, start, start + q.len());
 
         results.push(Match {
             doc_idx,
@@ -157,6 +156,41 @@ fn find_matches_in(
 
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// Number of context characters shown on each side of a match (R6.1).
+const CONTEXT_RADIUS: usize = 40;
+
+/// Build the display context for a match: the surrounding text on the match's
+/// line, clipped to at most `CONTEXT_RADIUS` characters on either side of the
+/// match (R6.1). A clip on either end is marked with an ellipsis so the reader
+/// knows the line continues.
+fn build_context(
+    chars: &[char],
+    line_start: usize,
+    line_end: usize,
+    match_start: usize,
+    match_end: usize,
+) -> String {
+    // Trim leading whitespace on the line so short lines read cleanly, but keep
+    // the window anchored on the match for long lines.
+    let mut ctx_start = line_start;
+    while ctx_start < match_start && chars[ctx_start].is_whitespace() {
+        ctx_start += 1;
+    }
+    let clip_start = match_start.saturating_sub(CONTEXT_RADIUS).max(ctx_start);
+    let clip_end = (match_end + CONTEXT_RADIUS).min(line_end);
+
+    let mut out = String::new();
+    if clip_start > ctx_start {
+        out.push('…');
+    }
+    let slice: String = chars[clip_start..clip_end].iter().collect();
+    out.push_str(slice.trim_end());
+    if clip_end < line_end {
+        out.push('…');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -218,6 +252,50 @@ mod tests {
         let results = search_project(&docs, "cat", true, None, None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].char_pos, 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn context_is_bounded_to_forty_chars_each_side() {
+        let dir = std::env::temp_dir().join(format!("pstar-projsearch-ctx-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // A long single line with the match in the middle.
+        let before = "x".repeat(100);
+        let after = "y".repeat(100);
+        fs::write(dir.join("a.md"), format!("{before}NEEDLE{after}\n")).unwrap();
+
+        let docs = vec![(0, String::from("A"), dir.join("a.md"))];
+        let results = search_project(&docs, "NEEDLE", false, None, None);
+        assert_eq!(results.len(), 1);
+        let ctx = &results[0].context;
+        // Ellipsis on both ends because the line is clipped.
+        assert!(
+            ctx.starts_with('…'),
+            "context should be clipped left: {ctx}"
+        );
+        assert!(ctx.ends_with('…'), "context should be clipped right: {ctx}");
+        assert!(ctx.contains("NEEDLE"));
+        // 40 x's + NEEDLE + 40 y's, plus two ellipsis markers.
+        let non_ellipsis = ctx.chars().filter(|&c| c != '…').count();
+        assert_eq!(non_ellipsis, 40 + "NEEDLE".chars().count() + 40);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn context_short_line_has_no_ellipsis() {
+        let dir =
+            std::env::temp_dir().join(format!("pstar-projsearch-ctx2-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.md"), "  Alice met Bob here.\n").unwrap();
+
+        let docs = vec![(0, String::from("A"), dir.join("a.md"))];
+        let results = search_project(&docs, "Bob", false, None, None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].context, "Alice met Bob here.");
 
         let _ = fs::remove_dir_all(&dir);
     }

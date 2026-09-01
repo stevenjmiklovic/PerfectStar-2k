@@ -13,7 +13,7 @@ use crate::diff::{self, DiffLine};
 use crate::export::docx::DocxExporter;
 use crate::export::epub::EpubExporter;
 use crate::export::html::{HtmlExporter, PlainTextExporter};
-use crate::export::{CompiledDoc, Exporter};
+use crate::export::{self, CompiledDoc, Exporter};
 use crate::history::{Edit, EditGroup, EditKind};
 use crate::keymap::{self, Cmd, Prefix};
 use crate::killring::{KillRing, PutCycle};
@@ -28,7 +28,7 @@ use crate::rtf;
 use crate::search::{ReplacePhase, ReplaceState, SearchState};
 use crate::snapshot::{SnapshotEntry, SnapshotStore};
 use crate::spellcheck;
-use crate::sprint::{Focus, Sprint};
+use crate::sprint::{Focus, Report, Sprint};
 use crate::stats::{DailyHistory, DocStats, GoalKind, SessionGoal};
 use crate::style::{Readability, StyleEngine};
 use crate::theme::Theme;
@@ -36,9 +36,24 @@ use crate::ui;
 
 const JUMP_STACK_MAX: usize = 32;
 
+/// The most characters an editorial comment body may hold (R9.1). Longer bodies
+/// are trimmed to this on create/edit rather than rejected, since the writer's
+/// words up to the limit are still worth keeping.
+const ANNOTATION_MAX_CHARS: usize = 2000;
+
 /// How long a finished sprint's report stays on screen. Long enough to read
 /// after a sentence, short enough that it never becomes chrome.
 const SPRINT_BANNER: Duration = Duration::from_secs(10);
+
+/// How long the goal-reached notification stays on screen (R2.4: at least 5
+/// seconds). Like the sprint banner, it survives keystrokes so the letter the
+/// writer types when the goal lands does not immediately erase it.
+const GOAL_BANNER: Duration = Duration::from_secs(5);
+
+/// How long the word/character counts stay on screen when revealed on demand
+/// (R2.1: at least 3 seconds). The writer glances at the number and returns to
+/// typing without the count becoming permanent chrome.
+const COUNT_FLASH: Duration = Duration::from_secs(3);
 
 /// Result of a shared list-navigation key check. Panels call `list_nav_key`
 /// before their own match arms so Up/Down/^E/^X/Esc are handled uniformly.
@@ -159,6 +174,12 @@ pub enum Mode {
     /// Every editorial comment in the document (R9.4).
     Annotations {
         entries: Vec<meta::Annotation>,
+        selected: usize,
+    },
+    /// The unified export format picker (R7.2): choose a target, then a path.
+    /// Only available formats appear; unbundled ones are omitted (R7.8).
+    ExportMenu {
+        entries: Vec<export::Target>,
         selected: usize,
     },
     /// A rendered comparison between two versions (R4.4, task 7.4).
@@ -282,10 +303,26 @@ pub struct App {
     pub doc_stats: DocStats,
     /// Whether the always-on word count is shown in the status line.
     pub show_word_count: bool,
+    /// Cached whole-project prose word count (R2.1). Refreshed when the project
+    /// loads, when the active document is switched, and on save — not per
+    /// keystroke, so a 40-file project never pays disk I/O in the typing path
+    /// (C6). `None` when no project is open.
+    pub project_words: Option<usize>,
+    /// When set, the counts are shown "on demand" until this instant elapses,
+    /// even if the always-on display is off (R2.1: at least 3 seconds).
+    count_flash: Option<Instant>,
+    /// Whether the binder shows each document's synopsis as a secondary line
+    /// (R5.3). Toggled by ^PY; on by default so a synopsis the writer set is
+    /// visible without having to ask for it.
+    pub show_synopsis: bool,
     /// Session writing goal (R2.3).
     pub goal: Option<SessionGoal>,
     /// Goal-reached notification was already shown this goal.
     goal_notified: bool,
+    /// The goal-reached notification and when it landed (R2.4). Kept out of
+    /// `status_msg` for the same reason as the sprint banner: it must survive
+    /// the keystroke that reaches the goal, staying up for [`GOAL_BANNER`].
+    goal_banner: Option<(String, Instant)>,
     /// Per-day words-written history for the active document.
     pub daily_history: DailyHistory,
     /// Word count at start of this editing session (for daily delta).
@@ -332,10 +369,15 @@ impl App {
         // As with `snapshot_root`: a test run must not write into the writer's
         // real stats directory. An unrooted history keeps working in memory and
         // saves nowhere, and the tests that check persistence build their own.
-        let daily_history = if cfg!(test) {
-            DailyHistory::default()
+        let (daily_history, goal) = if cfg!(test) {
+            (DailyHistory::default(), None)
         } else {
-            DailyHistory::load(pane.buf.path.as_deref())
+            (
+                DailyHistory::load(pane.buf.path.as_deref()),
+                // Resume an active session goal if the writer left one running
+                // when they last quit (R2.5).
+                SessionGoal::load_for(pane.buf.path.as_deref()),
+            )
         };
         let start_words = initial_stats.words;
         let mut app = App {
@@ -392,8 +434,14 @@ impl App {
             project: None, // R1.8: backward compat — no project at bare-file launch
             doc_stats: initial_stats,
             show_word_count: true,
-            goal: None,
-            goal_notified: false,
+            project_words: None,
+            count_flash: None,
+            show_synopsis: true,
+            // A goal restored from disk (R2.5) whose target was already reached
+            // should not re-fire its notification on reopen.
+            goal_notified: goal.as_ref().is_some_and(|g| g.reached),
+            goal,
+            goal_banner: None,
             daily_history,
             session_start_words: start_words,
             sprint: None,
@@ -554,22 +602,99 @@ impl App {
         }
 
         // Check session goal progress (R2.4).
-        if let Some(ref mut goal) = self.goal {
+        // Gather the reached-goal facts under the goal's borrow, then release it
+        // before touching the rest of `self` (banner, persistence).
+        let reached_now = if let Some(goal) = self.goal.as_mut() {
             if !goal.reached && goal.is_met(self.doc_stats.words) {
                 goal.reached = true;
-                if !self.goal_notified {
-                    self.goal_notified = true;
-                    let (current, target) = goal.progress(self.doc_stats.words);
-                    self.status_msg = Some(format!(
-                        "Goal reached! {current}/{target} {}",
-                        match goal.kind {
-                            GoalKind::Words => "words",
-                            GoalKind::Minutes => "minutes",
-                        }
-                    ));
+                let (current, target) = goal.progress(self.doc_stats.words);
+                let unit = match goal.kind {
+                    GoalKind::Words => "words",
+                    GoalKind::Minutes => "minutes",
+                };
+                Some(format!("Goal reached! {current}/{target} {unit}"))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(message) = reached_now
+            && !self.goal_notified
+        {
+            self.goal_notified = true;
+            // A goal that survives a restart (R2.5) must not re-notify, so
+            // persist that it has been reached. As with the daily history,
+            // tests never touch the writer's real stats dir.
+            if !cfg!(test) {
+                let path = self.panes[self.active].buf.path.clone();
+                if let Some(goal) = self.goal.as_ref() {
+                    goal.save_for(path.as_deref());
                 }
             }
+            // Non-blocking, no dismissal, visible for at least GOAL_BANNER
+            // (R2.4) — carried in its own banner so the keystroke that reached
+            // the goal cannot erase it.
+            self.goal_banner = Some((message, Instant::now()));
         }
+    }
+
+    /// Set a session goal from the ^OG prompt (R2.3). A bare number, or a
+    /// number with a `w`/`words` suffix, is a word goal; a `m`/`min`/`minutes`
+    /// suffix makes it a time goal. Both are bounds-checked before taking.
+    fn set_goal(&mut self, spec: &str) {
+        let spec = spec.trim();
+        let lower = spec.to_ascii_lowercase();
+        let (kind, digits) = if let Some(rest) = lower
+            .strip_suffix("minutes")
+            .or_else(|| lower.strip_suffix("min"))
+            .or_else(|| lower.strip_suffix('m'))
+        {
+            (GoalKind::Minutes, rest.trim())
+        } else if let Some(rest) = lower
+            .strip_suffix("words")
+            .or_else(|| lower.strip_suffix('w'))
+        {
+            (GoalKind::Words, rest.trim())
+        } else {
+            (GoalKind::Words, lower.trim())
+        };
+
+        let parsed = digits.parse::<usize>().ok();
+        let bounded = match (kind, parsed) {
+            (GoalKind::Words, Some(n)) => SessionGoal::validate_words(n).map(|n| (kind, n)),
+            (GoalKind::Minutes, Some(n)) => SessionGoal::validate_minutes(n).map(|n| (kind, n)),
+            (GoalKind::Minutes, None) => Err(String::from("Enter a number of minutes, e.g. 30m")),
+            (GoalKind::Words, None) => Err(String::from("Enter a number of words, e.g. 500")),
+        };
+
+        match bounded {
+            Ok((kind, target)) => {
+                let goal = SessionGoal::new(kind, target, self.doc_stats.words);
+                // Persist immediately so the target/baseline/start survive a
+                // restart (R2.5); tests stay out of the real stats dir.
+                if !cfg!(test) {
+                    let path = self.panes[self.active].buf.path.clone();
+                    goal.save_for(path.as_deref());
+                }
+                self.goal = Some(goal);
+                self.goal_notified = false;
+                self.goal_banner = None;
+                self.status_msg = Some(match kind {
+                    GoalKind::Words => format!("Goal set: {target} words this session"),
+                    GoalKind::Minutes => format!("Goal set: {target} minutes this session"),
+                });
+            }
+            Err(message) => self.status_msg = Some(message),
+        }
+    }
+
+    /// The goal-reached notification, while it is still fresh (R2.4).
+    pub fn goal_banner(&self) -> Option<&str> {
+        self.goal_banner
+            .as_ref()
+            .filter(|(_, shown)| shown.elapsed() < GOAL_BANNER)
+            .map(|(message, _)| message.as_str())
     }
 
     /// End a sprint whose clock ran out or whose word target was met: report it
@@ -593,13 +718,24 @@ impl App {
 
         let report = sprint.report(now, words);
         self.sprint = None;
+        self.file_sprint(&report, now, "Sprint done");
+    }
+
+    /// File a completed sprint: append it to the daily history and raise the
+    /// non-modal summary that outlives the keystroke that ended it.
+    ///
+    /// Both a sprint that reaches its target and one the writer calls off end
+    /// here (R3.3): a cancelled sprint is a sprint that ended, so its words and
+    /// elapsed time are still recorded (R3.4). `verb` is the only thing that
+    /// differs between the two — "Sprint done" versus "Sprint stopped".
+    fn file_sprint(&mut self, report: &Report, now: Instant, verb: &str) {
         self.daily_history
             .record_sprint(report.words, report.elapsed.as_secs(), report.met_target);
         let mark = if report.met_target { " ✓" } else { "" };
         let message = match self.daily_history.save() {
-            Ok(()) => format!("Sprint done — {}{mark}", report.summary()),
+            Ok(()) => format!("{verb} — {}{mark}", report.summary()),
             Err(error) => format!(
-                "Sprint done — {}{mark} (history not saved: {error})",
+                "{verb} — {}{mark} (history not saved: {error})",
                 report.summary()
             ),
         };
@@ -613,6 +749,24 @@ impl App {
             .as_ref()
             .filter(|(_, shown)| shown.elapsed() < SPRINT_BANNER)
             .map(|(message, _)| message.as_str())
+    }
+
+    /// Whether the word/character counts should render this frame (R2.1): either
+    /// the always-on display is enabled, or an on-demand reveal is still within
+    /// its at-least-3-second window.
+    pub fn counts_visible(&self) -> bool {
+        self.show_word_count
+            || self
+                .count_flash
+                .is_some_and(|shown| shown.elapsed() < COUNT_FLASH)
+    }
+
+    /// Recompute the cached whole-project prose word count (R2.1). Called at the
+    /// points where the set of documents or their on-disk contents may have
+    /// changed — project load, document switch, and save — never in the
+    /// keystroke path, so a large project never costs disk I/O while typing (C6).
+    pub fn refresh_project_words(&mut self) {
+        self.project_words = self.project.as_ref().map(|p| p.total_prose_words());
     }
 
     /// ^OF: strip the screen to the prose, or put the chrome back (R3.3).
@@ -644,6 +798,14 @@ impl App {
 
     fn offer_recovery_for_active(&mut self) {
         let pane = self.active;
+        // R11.7: if the state directory is inaccessible the journal has no path
+        // and every write is a silent no-op. Warn once at startup so the writer
+        // knows crash recovery is off for this session rather than assuming
+        // their unsaved work is protected.
+        if !self.recovery_journals[pane].is_available() {
+            self.status_msg = Some(String::from("Crash recovery unavailable for this session"));
+            return;
+        }
         match self.recovery_journals[pane].recoverable_text() {
             Ok(Some(text)) => {
                 self.pending_recovery = Some(PendingRecovery { pane, text });
@@ -742,6 +904,7 @@ impl App {
             Mode::ProjectSearch { .. } => self.handle_project_search_key(key),
             Mode::Revisions { .. } => self.handle_revisions_key(key),
             Mode::Annotations { .. } => self.handle_annotations_key(key),
+            Mode::ExportMenu { .. } => self.handle_export_menu_key(key),
             Mode::Diff { .. } => self.handle_diff_key(key),
             Mode::Normal => self.handle_normal_key(key),
         }
@@ -918,6 +1081,13 @@ impl App {
                             let path = doc.path.clone();
                             let title = doc.title.clone();
                             self.mode = Mode::Normal;
+                            // R1.3: save the currently open document before
+                            // opening the selected one, mirroring the project-
+                            // search jump path. Session restore on the newly
+                            // opened doc is handled by Pane::open.
+                            if self.panes[self.active].buf.dirty {
+                                self.save();
+                            }
                             match self.switch_active_pane(path) {
                                 Ok(()) => {
                                     self.status_msg = Some(format!("Opened: {title}"));
@@ -1180,6 +1350,7 @@ impl App {
                     InputAction::ExportProjectHtml,
                 );
             }
+            Cmd::ExportMenu => self.open_export_menu(),
             Cmd::ToggleWrap => {
                 self.wrap = !self.wrap;
                 self.left_col = 0;
@@ -1275,6 +1446,10 @@ impl App {
                 if matches!(self.mode, Mode::Binder { .. }) {
                     self.mode = Mode::Normal;
                 } else if self.project.is_some() {
+                    // Opening the binder is the moment the writer reviews the
+                    // whole project, and doc add/remove/reorder all reload the
+                    // project — so re-sum the whole-project total here (R2.1).
+                    self.refresh_project_words();
                     self.mode = Mode::Binder {
                         entries: self.binder_entries(),
                         selected: 0,
@@ -1293,16 +1468,22 @@ impl App {
             }
             Cmd::ProjectRemoveDoc => self.project_remove_doc(),
             Cmd::WordCount => {
+                // R2.1: ^OC toggles the counts between always-visible and
+                // on-demand. Turning the always-on display off still flashes the
+                // counts for at least COUNT_FLASH so the writer sees them once as
+                // they dismiss the permanent readout.
                 self.show_word_count = !self.show_word_count;
-                self.status_msg = Some(String::from(if self.show_word_count {
-                    "Word count on"
+                if self.show_word_count {
+                    self.count_flash = None;
+                    self.status_msg = Some(String::from("Word count on"));
                 } else {
-                    "Word count off"
-                }));
+                    self.count_flash = Some(Instant::now());
+                    self.status_msg = Some(String::from("Word count off (shown briefly)"));
+                }
             }
             Cmd::SetGoal => {
                 self.mode = Mode::Input {
-                    label: String::from("Session goal (words, e.g. 500)"),
+                    label: String::from("Session goal: words (500) or time (30m)"),
                     value: String::new(),
                     action: InputAction::SetGoal,
                 };
@@ -1343,13 +1524,15 @@ impl App {
             Cmd::RevisionsList => self.open_revisions(),
             Cmd::SprintStart => match self.sprint.take() {
                 // The same chord stops a running sprint: a countdown you can't
-                // call off isn't a writing tool. A stopped sprint reports what
-                // it managed but isn't filed as a finished one — R3.2 records
-                // sprints that *ended*, and a history full of abandoned
-                // three-minute stubs would tell the writer nothing.
+                // call off isn't a writing tool. Cancelling still *ends* the
+                // sprint, so its words and elapsed time are recorded up to the
+                // cancellation point and appended to the session history
+                // (R3.3, R3.4) — the same non-modal summary a finished sprint
+                // raises, only labelled "stopped".
                 Some(sprint) => {
-                    let report = sprint.report(Instant::now(), self.doc_stats.words);
-                    self.status_msg = Some(format!("Sprint stopped — {}", report.summary()));
+                    let now = Instant::now();
+                    let report = sprint.report(now, self.doc_stats.words);
+                    self.file_sprint(&report, now, "Sprint stopped");
                 }
                 None => {
                     // A new sprint replaces the last one's report.
@@ -1363,6 +1546,7 @@ impl App {
             },
             Cmd::FocusMode => self.toggle_focus(),
             Cmd::EditSynopsis => self.prompt_synopsis(),
+            Cmd::ToggleSynopsis => self.toggle_synopsis(),
             Cmd::OpenNotes => self.open_notes(),
             Cmd::ToggleDocRole => self.toggle_doc_role(),
             Cmd::BinderOpenSplit => self.binder_open_split(),
@@ -1413,6 +1597,9 @@ impl App {
                     crate::stats::DocStats::from_rope(&self.panes[self.active].buf.rope);
                 let active = self.active;
                 self.load_annotations(active);
+                // The active document changed; the whole-project total may too
+                // (R2.1). Recompute once, off the keystroke path.
+                self.refresh_project_words();
                 Ok(())
             }
             Err(e) => Err(format!("{e}")),
@@ -2073,18 +2260,7 @@ impl App {
                     InputAction::ProjectOpen => self.open_project(&path),
                     InputAction::ProjectNew => self.new_project(&path),
                     InputAction::ProjectAddDoc => self.project_add_doc(&path),
-                    InputAction::SetGoal => match path.parse::<usize>() {
-                        Ok(n) if n > 0 => {
-                            self.goal =
-                                Some(SessionGoal::new(GoalKind::Words, n, self.doc_stats.words));
-                            self.goal_notified = false;
-                            self.status_msg = Some(format!("Goal set: {n} words this session"));
-                        }
-                        _ => {
-                            self.status_msg =
-                                Some(String::from("Enter a positive number of words"));
-                        }
-                    },
+                    InputAction::SetGoal => self.set_goal(&path),
                     InputAction::SnapshotLabel => {
                         let label = (!path.is_empty()).then_some(path.as_str());
                         self.take_snapshot(label);
@@ -2216,6 +2392,115 @@ impl App {
             }
             Err(err) => self.status_msg = Some(format!("{format} export failed: {err}")),
         }
+    }
+
+    /// ^KF: open the unified format-selection step (R7.2). The list is built
+    /// from the single availability source of truth, so a format whose
+    /// dependency is unbundled is omitted and its name reported (R7.8) rather
+    /// than offered and left to fail. Toggles closed if already open.
+    fn open_export_menu(&mut self) {
+        if matches!(self.mode, Mode::ExportMenu { .. }) {
+            self.mode = Mode::Normal;
+            return;
+        }
+        let entries = export::available_targets();
+        if entries.is_empty() {
+            // No format can be produced by this build. Name what's missing
+            // rather than presenting an empty picker (R7.8).
+            let missing: Vec<String> = export::unavailable_targets()
+                .into_iter()
+                .map(|(t, dep)| format!("{} (needs {dep})", t.label()))
+                .collect();
+            self.status_msg = Some(format!("No export formats available: {}", missing.join(", ")));
+            return;
+        }
+        // If any format was omitted for a missing dependency, say so up front so
+        // the writer knows why it isn't in the list (R7.8).
+        let omitted = export::unavailable_targets();
+        if !omitted.is_empty() {
+            let names: Vec<String> = omitted
+                .into_iter()
+                .map(|(t, dep)| format!("{} (needs {dep})", t.label()))
+                .collect();
+            self.status_msg = Some(format!("Unavailable: {}", names.join(", ")));
+        }
+        self.mode = Mode::ExportMenu {
+            entries,
+            selected: 0,
+        };
+    }
+
+    fn handle_export_menu_key(&mut self, key: KeyEvent) {
+        let (count, selected) = match &self.mode {
+            Mode::ExportMenu { entries, selected } => (entries.len(), *selected),
+            _ => return,
+        };
+        let last = count.saturating_sub(1);
+        match list_nav_key(&key) {
+            ListNav::Dismiss => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            ListNav::Up => {
+                if let Mode::ExportMenu { selected, .. } = &mut self.mode {
+                    *selected = selected.saturating_sub(1);
+                }
+                return;
+            }
+            ListNav::Down => {
+                if let Mode::ExportMenu { selected, .. } = &mut self.mode {
+                    *selected = (*selected + 1).min(last);
+                }
+                return;
+            }
+            ListNav::Other => {}
+        }
+        if key.code == KeyCode::Enter {
+            let target = match &self.mode {
+                Mode::ExportMenu { entries, .. } => entries.get(selected).copied(),
+                _ => None,
+            };
+            if let Some(target) = target {
+                self.route_export_target(target);
+            }
+        }
+    }
+
+    /// Send a chosen format into the existing output-path prompt with the
+    /// matching `InputAction`, so the format-selection step reuses
+    /// `export_with` / `export_project` / `finish_export` unchanged (R7.2).
+    /// A project, when loaded, exports the compiled book for the rich formats
+    /// exactly as the direct project chords (^PD/^PF/^PH) do; plain-text and
+    /// manuscript RTF stay single-document (matching ^KE/^KM).
+    fn route_export_target(&mut self, target: export::Target) {
+        let has_project = self.project.is_some();
+        let (label, action) = match target {
+            export::Target::PlainText => (
+                "Export to file (notes stripped)",
+                InputAction::ExportClean,
+            ),
+            export::Target::Rtf => (
+                "Export manuscript RTF to file",
+                InputAction::ExportManuscript,
+            ),
+            export::Target::Docx if has_project => {
+                ("Export project DOCX to file", InputAction::ExportProjectDocx)
+            }
+            export::Target::Docx => ("Export DOCX to file", InputAction::ExportDocx),
+            export::Target::Epub if has_project => {
+                ("Export project EPUB to file", InputAction::ExportProjectEpub)
+            }
+            export::Target::Epub => ("Export EPUB to file", InputAction::ExportEpub),
+            export::Target::Html if has_project => {
+                ("Export project HTML to file", InputAction::ExportProjectHtml)
+            }
+            export::Target::Html => ("Export HTML to file", InputAction::ExportHtml),
+        };
+        self.mode = Mode::Input {
+            label: String::from(label),
+            value: String::new(),
+            action,
+        };
     }
 
     fn read_file(&mut self, path: &str) {
@@ -2520,6 +2805,10 @@ impl App {
         // a journal keyed to the newly adopted destination.
         self.recovery_journals[self.active] = Journal::new(source.as_deref());
         self.save_session();
+        // The active document's on-disk contents just changed, so the cached
+        // whole-project total is stale (R2.1). Refresh it here, off the
+        // keystroke path.
+        self.refresh_project_words();
         self.status_msg = Some(if warnings.is_empty() {
             format!("Saved {file_name}")
         } else {
@@ -2618,6 +2907,8 @@ impl App {
                 let name = proj.manifest.name.clone();
                 let count = proj.manifest.docs.len();
                 self.project = Some(proj);
+                // A project is now open; compute its whole-project total (R2.1).
+                self.refresh_project_words();
                 self.status_msg = Some(format!(
                     "Project \"{}\" opened ({} document{})",
                     name,
@@ -2706,6 +2997,7 @@ impl App {
         match Project::load(&manifest_path) {
             Ok(proj) => {
                 self.project = Some(proj);
+                self.refresh_project_words();
                 self.status_msg = Some(format!(
                     "Project \"{name}\" created (use ^PA to add documents)"
                 ));
@@ -2829,12 +3121,17 @@ impl App {
             .enumerate()
             .map(|(idx, doc)| BinderEntry {
                 idx,
-                title: doc.title.clone(),
+                // R1.2: the binder title is the document's first Markdown
+                // heading, falling back to the manifest title (file stem).
+                title: project.doc_title(idx),
                 word_count: project.doc_word_count(idx),
                 exists: project.doc_exists(idx),
+                // R5.3: the synopsis is a toggleable secondary line. When hidden
+                // it reads as empty, which is exactly what the binder renderer
+                // already treats as "no second row" — one switch, no new UI code.
                 synopsis: match &self.meta_root {
-                    Some(root) => meta::synopsis(root, &doc.path),
-                    None => String::new(),
+                    Some(root) if self.show_synopsis => meta::synopsis(root, &doc.path),
+                    _ => String::new(),
                 },
             })
             .collect()
@@ -3016,18 +3313,34 @@ impl App {
             }
             ListNav::Other => {}
         }
+        let replacing = replace_with.is_some();
         match key.code {
+            // Y/N/A/Q per-match confirm during replace, consistent with the
+            // in-document ^QA replace ergonomics (R6.3).
+            KeyCode::Char('y') | KeyCode::Char('Y') if replacing => {
+                self.project_search_replace_at(selected);
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') if replacing => {
+                // Skip this match; leave it in the list and advance.
+                if let Mode::ProjectSearch { selected, .. } = &mut self.mode {
+                    *selected = (*selected + 1).min(last);
+                }
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') if replacing => {
+                // Replace all remaining (R6.3).
+                self.project_search_replace_all();
+            }
+            KeyCode::Char('q') | KeyCode::Char('Q') if replacing => {
+                self.mode = Mode::Normal;
+                self.status_msg = Some(String::from("Project replace cancelled"));
+            }
+            // Legacy ^R accelerator for replace-current, retained for muscle memory.
+            KeyCode::Char('r') if ctrl && replacing => {
+                self.project_search_replace_at(selected);
+            }
             KeyCode::Enter => {
                 // Jump to the selected result (R6.2).
                 self.project_search_jump(selected);
-            }
-            KeyCode::Char('r') if ctrl && replace_with.is_some() => {
-                // Replace at current match and advance (R6.3).
-                self.project_search_replace_at(selected);
-            }
-            KeyCode::Char('a') if ctrl && replace_with.is_some() => {
-                // Replace all remaining (R6.3).
-                self.project_search_replace_all();
             }
             _ => {}
         }
@@ -3083,15 +3396,23 @@ impl App {
             )
         };
 
-        // Ensure the file is open in the active pane.
+        // Ensure the file is open in the active pane. If the current pane is
+        // dirty and we must switch to a different file, persist it first via
+        // the atomic-save path (R6.4) so no in-buffer work is silently lost
+        // when the pane is replaced.
         if self.panes[self.active].buf.path.as_deref() != Some(path.as_path()) {
-            if let Err(e) = self.switch_active_pane(path) {
+            if self.panes[self.active].buf.dirty {
+                self.save();
+            }
+            if let Err(e) = self.switch_active_pane(path.clone()) {
                 self.status_msg = Some(format!("Failed to open for replace: {e}"));
                 return;
             }
         }
 
-        // Apply the replacement as an undoable edit (R6.4, R6.6).
+        // Apply the replacement as an undoable edit in this document's own log
+        // (R6.4). The buffer is left dirty and is NOT persisted here: the user
+        // reviews and explicitly saves (R6.7 — no silent unreviewable writes).
         self.set_cursor(char_pos);
         self.apply_edit(
             char_pos,
@@ -3100,17 +3421,29 @@ impl App {
             EditKind::Other,
             char_pos + replacement.chars().count(),
         );
-        self.save();
 
-        // Advance to next result (remove current from the list).
+        // Advance to next result (remove current from the list). Char positions
+        // after the current match in the same file shift by the length delta.
+        let delta = replacement.chars().count() as isize - query_len as isize;
         if let Mode::ProjectSearch {
             results, selected, ..
         } = &mut self.mode
         {
-            results.remove(idx);
+            if idx < results.len() {
+                results.remove(idx);
+            }
+            if delta != 0 {
+                for m in results.iter_mut() {
+                    if m.path == path && m.char_pos > char_pos {
+                        m.char_pos = (m.char_pos as isize + delta).max(0) as usize;
+                    }
+                }
+            }
             if results.is_empty() {
                 self.mode = Mode::Normal;
-                self.status_msg = Some(String::from("All replacements done"));
+                self.status_msg = Some(String::from(
+                    "All replacements applied (unsaved — ^KS/^KD to save)",
+                ));
             } else {
                 *selected = idx.min(results.len().saturating_sub(1));
             }
@@ -3326,7 +3659,13 @@ impl App {
         let Some((root, doc)) = self.meta_target() else {
             return;
         };
-        let text = text.trim().to_string();
+        // R9.1: a body is up to 2000 characters. Trim surrounding whitespace so
+        // an all-spaces answer reads as empty (and deletes/discards below), and
+        // cap the length by chars — not bytes — so the limit is the same for
+        // any script the writer types.
+        let trimmed = text.trim();
+        let over_limit = trimmed.chars().count() > ANNOTATION_MAX_CHARS;
+        let text: String = trimmed.chars().take(ANNOTATION_MAX_CHARS).collect();
         let existing = self.annotation_at_cursor();
 
         let message = match (existing, text.is_empty()) {
@@ -3339,7 +3678,11 @@ impl App {
             (Some(i), false) => {
                 self.annotations[i].text = text;
                 self.annotations[i].orphaned = false;
-                String::from("Comment updated")
+                String::from(if over_limit {
+                    "Comment updated (trimmed to 2000 chars)"
+                } else {
+                    "Comment updated"
+                })
             }
             (None, true) => String::from("Comment discarded"),
             (None, false) => {
@@ -3353,7 +3696,11 @@ impl App {
                     .push(meta::Annotation::new(anchor, len, text));
                 self.annotations
                     .sort_by_key(|annotation| (annotation.anchor, annotation.len));
-                String::from("Comment added")
+                String::from(if over_limit {
+                    "Comment added (trimmed to 2000 chars)"
+                } else {
+                    "Comment added"
+                })
             }
         };
         let active = self.active;
@@ -3478,6 +3825,20 @@ impl App {
             return None;
         };
         Some((root, doc))
+    }
+
+    /// ^PY: show or hide the binder's synopsis secondary lines (R5.3).
+    fn toggle_synopsis(&mut self) {
+        self.show_synopsis = !self.show_synopsis;
+        self.status_msg = Some(String::from(if self.show_synopsis {
+            "Binder synopses shown"
+        } else {
+            "Binder synopses hidden"
+        }));
+        // Rebuild the panel so the change is visible immediately if it's open.
+        if let Mode::Binder { selected, .. } = self.mode {
+            self.refresh_binder_with_selection(selected);
+        }
     }
 
     /// ^PI: edit this document's synopsis, pre-filled with the current one so it

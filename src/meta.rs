@@ -31,6 +31,11 @@ use crate::paths;
 /// Suffix of a document's freeform notes file.
 const NOTES_SUFFIX: &str = "-notes.md";
 
+/// The most characters a synopsis may hold (R5.1). A synopsis is a one-line
+/// summary, so anything past this is truncated rather than stored, keeping the
+/// binder's secondary line to a single readable row.
+const SYNOPSIS_MAX: usize = 500;
+
 /// An editorial comment anchored to a span of the document (R9.1).
 ///
 /// The comment text lives here, never in the manuscript, which is what makes it
@@ -174,12 +179,19 @@ pub fn set_annotations(root: &Path, doc: &Path, annotations: &[Annotation]) -> i
     save(root, doc, &meta)
 }
 
-/// Collapse a synopsis to a single line.
+/// Collapse a synopsis to a single line and cap it at [`SYNOPSIS_MAX`] chars.
 ///
 /// It is displayed as one row of the binder, so a pasted paragraph would
-/// otherwise render as a broken line or blow the panel's layout apart.
+/// otherwise render as a broken line or blow the panel's layout apart; the
+/// length cap (R5.1) is by chars, not bytes, so the limit is the same for any
+/// script the writer types.
 fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > SYNOPSIS_MAX {
+        collapsed.chars().take(SYNOPSIS_MAX).collect()
+    } else {
+        collapsed
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +232,25 @@ mod tests {
 
         set_synopsis(&dir, &doc, "").unwrap();
         assert_eq!(synopsis(&dir, &doc), "", "an empty synopsis clears it");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_synopsis_is_capped_at_five_hundred_chars() {
+        // R5.1: the synopsis is a one-line summary of at most 500 chars.
+        let dir = scratch_dir("cap");
+        let doc = dir.join("chapter.md");
+
+        // Multibyte on purpose: the cap is by chars, not bytes.
+        let long = "é".repeat(600);
+        set_synopsis(&dir, &doc, &long).unwrap();
+        assert_eq!(synopsis(&dir, &doc).chars().count(), SYNOPSIS_MAX);
+
+        // A synopsis at or under the limit is stored whole.
+        let short = "é".repeat(SYNOPSIS_MAX);
+        set_synopsis(&dir, &doc, &short).unwrap();
+        assert_eq!(synopsis(&dir, &doc), short);
 
         let _ = std::fs::remove_dir_all(dir);
     }

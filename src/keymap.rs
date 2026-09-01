@@ -95,6 +95,8 @@ pub enum Cmd {
     ExportProjectDocx,
     ExportProjectEpub,
     ExportProjectHtml,
+    /// Unified format-selection step: pick a target, then a path (R7.2).
+    ExportMenu,
     // Onscreen
     CycleTheme,
     RevealCodes,
@@ -136,6 +138,8 @@ pub enum Cmd {
     /// Notes & research (R5)
     /// Edit this document's one-line synopsis (R5.1, R5.3).
     EditSynopsis,
+    /// Show or hide the binder's synopsis secondary lines (R5.3).
+    ToggleSynopsis,
     /// Open this document's freeform notes in a split (R5.1, R5.4).
     OpenNotes,
     /// Mark the selected binder document as a note, or back (R5.2).
@@ -493,6 +497,14 @@ pub const BINDINGS: &[Binding] = &[
         chord: Pref(K, 'l'),
         name: "export HTML",
     },
+    // The unified format picker sits with the other export chords. ^KF is the
+    // last free ^K letter, and F reads as "export Format" (R7.2). The direct
+    // per-format chords above keep working unchanged.
+    Binding {
+        cmd: Cmd::ExportMenu,
+        chord: Pref(K, 'f'),
+        name: "export (choose format)",
+    },
     // Snapshots live under ^K with the other file-ish commands. Design §5 asked
     // for ^KL as the revisions list, but ^KL is export HTML; ^KO ("old
     // versions") keeps the group together without stealing a bound chord.
@@ -652,6 +664,11 @@ pub const BINDINGS: &[Binding] = &[
         name: "document synopsis",
     },
     Binding {
+        cmd: Cmd::ToggleSynopsis,
+        chord: Pref(P, 'y'),
+        name: "binder: show/hide synopses",
+    },
+    Binding {
         cmd: Cmd::OpenNotes,
         chord: Pref(P, 't'),
         name: "document notes in a split",
@@ -807,6 +824,24 @@ mod tests {
             assert!(!name.is_empty(), "{cmd:?} has no name");
             assert!(chord.starts_with("^K"), "{cmd:?} chord is {chord}");
         }
+    }
+
+    #[test]
+    fn export_menu_is_bound_without_stealing_a_chord() {
+        // R7.2: ^KF opens the unified format picker. The direct per-format
+        // export chords must be untouched.
+        assert_eq!(lookup_prefixed(Prefix::K, 'f'), Some(Cmd::ExportMenu));
+        assert_eq!(lookup_prefixed(Prefix::K, 'e'), Some(Cmd::ExportClean));
+        assert_eq!(lookup_prefixed(Prefix::K, 'm'), Some(Cmd::ExportManuscript));
+        assert_eq!(lookup_prefixed(Prefix::K, 'j'), Some(Cmd::ExportDocx));
+        assert_eq!(lookup_prefixed(Prefix::K, 'g'), Some(Cmd::ExportEpub));
+        assert_eq!(lookup_prefixed(Prefix::K, 'l'), Some(Cmd::ExportHtml));
+        // And it's reachable by name in the palette (R12.1).
+        assert!(
+            palette_entries()
+                .iter()
+                .any(|(c, name, _)| *c == Cmd::ExportMenu && !name.is_empty())
+        );
     }
 
     #[test]

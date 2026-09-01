@@ -193,6 +193,80 @@ fn parse_runs(line: &str) -> Vec<TextRun> {
     runs
 }
 
+/// The export targets the unified format-selection step (R7.2) can offer.
+/// Each variant maps to an existing single-document / project export path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// Plain text with note lines stripped (the long-standing `^KE`).
+    PlainText,
+    /// Standard-manuscript-format RTF (`^KM`).
+    Rtf,
+    /// Word DOCX (`^KJ` / project `^PD`).
+    Docx,
+    /// EPUB 3 (`^KG` / project `^PF`).
+    Epub,
+    /// Structural HTML (`^KL` / project `^PH`).
+    Html,
+}
+
+impl Target {
+    /// The human-readable name shown in the selection list and status area.
+    pub fn label(self) -> &'static str {
+        match self {
+            Target::PlainText => "Plain text",
+            Target::Rtf => "Manuscript RTF",
+            Target::Docx => "DOCX",
+            Target::Epub => "EPUB",
+            Target::Html => "HTML",
+        }
+    }
+
+    /// The dependency this format needs beyond the bundled binary, if any.
+    ///
+    /// Every current exporter is hand-generated with no external tool or crate
+    /// (ADR-006, ADR-013), so this is always `None` today. It is the single
+    /// enforcement point for R7.8: a format whose dependency is unbundled
+    /// returns its name here, is omitted from the selection list, and has that
+    /// name stated in the status area rather than being offered and failing.
+    pub fn missing_dependency(self) -> Option<&'static str> {
+        match self {
+            Target::PlainText | Target::Rtf | Target::Docx | Target::Epub | Target::Html => None,
+        }
+    }
+
+    /// Whether this format can be produced by the current build.
+    pub fn is_available(self) -> bool {
+        self.missing_dependency().is_none()
+    }
+}
+
+/// Every export target in selection-list order. The single source of truth the
+/// format-selection step (R7.2) and its availability gate (R7.8) draw from.
+pub const TARGETS: &[Target] = &[
+    Target::Rtf,
+    Target::Docx,
+    Target::Epub,
+    Target::Html,
+    Target::PlainText,
+];
+
+/// A format offered in the selection list: an available target (R7.2). Formats
+/// whose dependency is unbundled are omitted here and reported separately via
+/// [`unavailable_targets`] (R7.8).
+pub fn available_targets() -> Vec<Target> {
+    TARGETS.iter().copied().filter(|t| t.is_available()).collect()
+}
+
+/// The (target, missing-dependency) pairs omitted from the selection list, so a
+/// caller can state the missing dependency name in the status area (R7.8).
+pub fn unavailable_targets() -> Vec<(Target, &'static str)> {
+    TARGETS
+        .iter()
+        .copied()
+        .filter_map(|t| t.missing_dependency().map(|dep| (t, dep)))
+        .collect()
+}
+
 pub trait Exporter {
     /// Produce the complete destination bytes without touching the output path.
     fn render(&self, doc: &CompiledDoc) -> io::Result<Vec<u8>>;
@@ -384,6 +458,34 @@ mod tests {
             !doc.blocks.iter().any(|b| matches!(b, Block::PageBreak)),
             "Single-doc export must not interpret form-feed as PageBreak"
         );
+    }
+
+    #[test]
+    fn all_five_targets_are_available_today() {
+        // Every exporter is hand-generated (ADR-006/ADR-013), so the selection
+        // list offers all five formats and omits none (R7.2).
+        let available = available_targets();
+        assert_eq!(available.len(), 5);
+        for t in [
+            Target::Rtf,
+            Target::Docx,
+            Target::Epub,
+            Target::Html,
+            Target::PlainText,
+        ] {
+            assert!(available.contains(&t), "{} should be available", t.label());
+            assert!(t.is_available());
+            assert_eq!(t.missing_dependency(), None);
+        }
+        assert!(unavailable_targets().is_empty());
+    }
+
+    #[test]
+    fn every_target_has_a_display_label() {
+        // The selection list and the R7.8 status message both need a name.
+        for t in TARGETS {
+            assert!(!t.label().is_empty(), "{t:?} has no label");
+        }
     }
 
     #[test]
