@@ -32,6 +32,14 @@ pub struct Pane {
     pub bookmarks: [Option<usize>; 10],
     /// Ring of positions left behind by long-range jumps (^QP walks it).
     pub jump_stack: Vec<usize>,
+    /// Editorial comments anchored into this document (R9.1). Loaded from the
+    /// sidecar when `App` installs the pane and adjusted alongside the block
+    /// marks and bookmarks on every edit (R9.5).
+    pub annotations: Vec<crate::meta::Annotation>,
+    /// Annotations have moved (or changed) since the sidecar was written. Kept
+    /// per pane rather than on `App` so a second window's adjusted anchors can't
+    /// be forgotten when the focus moves away from it.
+    pub annotations_dirty: bool,
     /// When this pane's buffer last changed (drives idle autosave).
     pub last_edit: Instant,
     /// This pane's text-area size, captured at render time.
@@ -52,6 +60,8 @@ impl Pane {
             blocks: BlockMarks::default(),
             bookmarks: [None; 10],
             jump_stack: Vec::new(),
+            annotations: Vec::new(),
+            annotations_dirty: false,
             last_edit: Instant::now(),
             view_rows: 24,
             view_cols: 80,

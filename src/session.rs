@@ -3,14 +3,13 @@
 //! and undo history — stored under the user's data dir, keyed by file path,
 //! without polluting the document's folder.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::block::BlockMarks;
 use crate::history::{EditGroup, History};
+use crate::paths;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Session {
@@ -28,24 +27,9 @@ pub struct Session {
     pub undo_ptr: Option<usize>,
 }
 
-fn session_dir() -> Option<PathBuf> {
-    let base = dirs::state_dir().or_else(dirs::data_local_dir)?;
-    Some(base.join("perfectstar2k").join("sessions"))
-}
-
 fn session_path(file: &Path) -> Option<PathBuf> {
-    let canonical = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
-    let mut h = DefaultHasher::new();
-    canonical.hash(&mut h);
-    let name = format!(
-        "{}-{:016x}.json",
-        canonical
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        h.finish()
-    );
-    Some(session_dir()?.join(name))
+    let name = format!("{}.json", paths::path_key(file));
+    Some(paths::sessions()?.join(name))
 }
 
 pub fn load(file: &Path, len_chars: usize) -> Option<Session> {

@@ -1,0 +1,4 @@
+# PTY E2E harness dependencies. Install into a venv:
+#   python3 -m venv .harness-venv
+#   .harness-venv/bin/pip install -r tests/harness/requirements.txt
+pyte>=0.8

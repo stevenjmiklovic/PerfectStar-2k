@@ -55,6 +55,21 @@ pub struct Theme {
     /// (a misspelled word inside **bold** still looks bold) rather than
     /// replacing it.
     pub misspelled: Style,
+    /// Style issue (R8.2). Deliberately a different colour from `misspelled`,
+    /// and like it, applied with `Style::patch` — a misspelling inside a flagged
+    /// sentence still reads as a misspelling, because a typo is a fact and style
+    /// is advice.
+    pub style_issue: Style,
+    /// Annotated span (R9.2). Like `misspelled`, it leaves `bg` unset and is
+    /// applied with `Style::patch` so a comment on **bold** text still reads as
+    /// bold — the prose flow is never altered, only marked.
+    pub annotated: Style,
+    /// Added line in the revision diff view (R4.4). A full-row band rather than
+    /// a coloured foreground, so add/remove reads at a glance on the overlay's
+    /// own background.
+    pub diff_added: Style,
+    /// Removed line in the revision diff view.
+    pub diff_removed: Style,
     // Markdown styling
     pub md_marker: Style,
     pub md_bold: Style,
@@ -72,7 +87,17 @@ impl Theme {
             dim: Style::new().fg(dos::LIGHT_CYAN).bg(dos::BLUE),
             block: Style::new().fg(dos::BLUE).bg(dos::WHITE),
             highlight: Style::new().fg(dos::BLACK).bg(dos::YELLOW),
-            misspelled: Style::new().fg(dos::LIGHT_RED).add_modifier(Modifier::UNDERLINED),
+            misspelled: Style::new()
+                .fg(dos::LIGHT_RED)
+                .add_modifier(Modifier::UNDERLINED),
+            style_issue: Style::new()
+                .fg(dos::LIGHT_GREEN)
+                .add_modifier(Modifier::UNDERLINED),
+            annotated: Style::new()
+                .fg(dos::LIGHT_MAGENTA)
+                .add_modifier(Modifier::UNDERLINED),
+            diff_added: Style::new().fg(dos::BLACK).bg(dos::LIGHT_GREEN),
+            diff_removed: Style::new().fg(dos::BLACK).bg(dos::LIGHT_RED),
             md_marker: Style::new().fg(dos::LIGHT_CYAN).bg(dos::BLUE),
             md_bold: Style::new()
                 .fg(dos::WHITE)
@@ -98,7 +123,17 @@ impl Theme {
             dim: Style::new().fg(Color::DarkGray).bg(Color::Black),
             block: Style::new().fg(Color::Black).bg(Color::Gray),
             highlight: Style::new().fg(Color::Black).bg(Color::Yellow),
-            misspelled: Style::new().fg(Color::Red).add_modifier(Modifier::UNDERLINED),
+            misspelled: Style::new()
+                .fg(Color::Red)
+                .add_modifier(Modifier::UNDERLINED),
+            style_issue: Style::new()
+                .fg(Color::Green)
+                .add_modifier(Modifier::UNDERLINED),
+            annotated: Style::new()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::UNDERLINED),
+            diff_added: Style::new().fg(Color::Black).bg(Color::Green),
+            diff_removed: Style::new().fg(Color::Black).bg(Color::Red),
             md_marker: Style::new().fg(Color::DarkGray).bg(Color::Black),
             md_bold: Style::new()
                 .fg(Color::White)
@@ -124,7 +159,21 @@ impl Theme {
             dim: Style::new().add_modifier(ratatui::style::Modifier::DIM),
             block: Style::new().add_modifier(ratatui::style::Modifier::REVERSED),
             highlight: Style::new().fg(Color::Black).bg(Color::Yellow),
-            misspelled: Style::new().fg(Color::Red).add_modifier(Modifier::UNDERLINED),
+            misspelled: Style::new()
+                .fg(Color::Red)
+                .add_modifier(Modifier::UNDERLINED),
+            style_issue: Style::new()
+                .fg(Color::Green)
+                .add_modifier(Modifier::UNDERLINED),
+            annotated: Style::new()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::UNDERLINED),
+            // REVERSED turns the foreground into the band, matching how this
+            // theme draws every other highlight without naming a background.
+            diff_added: Style::new()
+                .fg(Color::Green)
+                .add_modifier(Modifier::REVERSED),
+            diff_removed: Style::new().fg(Color::Red).add_modifier(Modifier::REVERSED),
             md_marker: Style::new().add_modifier(Modifier::DIM),
             md_bold: Style::new().add_modifier(Modifier::BOLD),
             md_italic: Style::new().add_modifier(Modifier::ITALIC),

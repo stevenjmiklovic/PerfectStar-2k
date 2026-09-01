@@ -2,6 +2,27 @@
 
 <!-- changelogging: start -->
 
+## 0.4.0 (2026-07-14)
+
+The **P0 milestone**: a writer can run a whole book in `pstar` and trust it — multi-file project management, professional export, data safety, statistics, and project-wide search.
+
+### Features
+
+- **Project/binder (R1).** Multi-file manuscript management via `.pstarproj` TOML manifests. Binder panel (^PB) with reorder (^PE/^PX), add (^PA), remove (^PR); compile concatenates included docs in binder order with configurable separators (page break, blank lines, horizontal rule, or none). ADR-012.
+- **Professional exports (R7).** Shared `CompiledDoc` intermediate model with `Exporter` trait. RTF unchanged (^KM, golden-file proven). New hand-generated HTML (^KL), DOCX (^KJ), and EPUB (^KG) — all fully offline, no external dependencies. Project export (^PD/^PF/^PH) compiles binder order with separator semantics. Atomic replacement so a failed export never clobbers a good one. ADR-013.
+- **Writing statistics & goals (R2).** Prose-aware incremental word/char counting (notes and markers excluded, matching export). Cached per-line counts updated on edit, debounced full recount on idle. Status-line shows word count (^OC toggle), selection count when a block is active, and session goal progress. Session goals (^OG) with non-blocking notification. Daily words-written history persisted as JSON, viewable via ^OI overlay.
+- **Project-wide search & replace (R6).** Search all project docs (^PS) with smartcase and whole-word matching. Navigable results overlay with file, line, and context. Jump-to-result opens the doc at the match. Replace (^PW) offers per-match confirm (^R) or replace-all (^A), opening each affected file as an undoable edit through atomic save — no silent unreviewable writes.
+- **Backup & crash recovery (R11).** Save-failure handling with alternate-path prompt. Crash-recovery journals written on idle and offered on startup as one undoable edit. Rolling timestamped backups with configurable depth. Every file write uses temp-then-rename so a manuscript is never truncated.
+
+### Internal
+
+- New modules: `project.rs`, `recovery.rs`, `export/` (mod, docx, epub, html, zip), `stats.rs`, `projsearch.rs`.
+- New `^P` prefix for project commands (^PN, ^PP, ^PB, ^PE, ^PX, ^PA, ^PR, ^PD, ^PF, ^PH, ^PS, ^PW).
+- New `^O` commands: ^OC (word count toggle), ^OG (set goal), ^OI (stats overlay).
+- `normalize.rs` is the single source of truth for prose definition (notes, markers, typography).
+- `paths.rs` extended with `stats()`, `recovery()`, and other metadata-root accessors.
+- 151 tests across all modules.
+
 ## 0.3.0 (2026-07-04)
 
 ### Features

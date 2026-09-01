@@ -1,0 +1,89 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "**1.6 Compile.** Concatenate `include_in_compile` docs in order with the": [
+      {
+        "executionId": "fd5aa7d4-1bd3-4e54-b37b-52794a6a4724",
+        "chatSessionId": "sess_530b002f-45ab-4652-afeb-33e9fc9a9db5",
+        "timestamp": 1784049149289
+      },
+      {
+        "executionId": "fd5aa7d4-1bd3-4e54-b37b-52794a6a4724",
+        "chatSessionId": "sess_530b002f-45ab-4652-afeb-33e9fc9a9db5",
+        "timestamp": 1784049904928
+      }
+    ],
+    "**1.7 Tests.** Manifest round-trip; reorder persistence; missing-file": [
+      {
+        "executionId": "2667b170-0e44-4a7c-9ef3-895fbd1332b0",
+        "chatSessionId": "sess_530b002f-45ab-4652-afeb-33e9fc9a9db5",
+        "timestamp": 1784051726947
+      },
+      {
+        "executionId": "2667b170-0e44-4a7c-9ef3-895fbd1332b0",
+        "chatSessionId": "sess_530b002f-45ab-4652-afeb-33e9fc9a9db5",
+        "timestamp": 1784051830067
+      }
+    ],
+    "**2.1 [gate] Save-failure handling.** Catch `io::Error` from": [
+      {
+        "executionId": "b9b4ba58-d5e8-4c89-bdc5-48973041751b",
+        "chatSessionId": "sess_530b002f-45ab-4652-afeb-33e9fc9a9db5",
+        "timestamp": 1784052075063
+      },
+      {
+        "executionId": "b9b4ba58-d5e8-4c89-bdc5-48973041751b",
+        "chatSessionId": "sess_530b002f-45ab-4652-afeb-33e9fc9a9db5",
+        "timestamp": 1784053334146
+      }
+    ],
+    "**2.2 Crash-recovery journal.** Write buffer text to": [
+      {
+        "executionId": "b9b4ba58-d5e8-4c89-bdc5-48973041751b",
+        "chatSessionId": "sess_530b002f-45ab-4652-afeb-33e9fc9a9db5",
+        "timestamp": 1784053374241
+      },
+      {
+        "executionId": "b9b4ba58-d5e8-4c89-bdc5-48973041751b",
+        "chatSessionId": "sess_530b002f-45ab-4652-afeb-33e9fc9a9db5",
+        "timestamp": 1784054101391
+      }
+    ],
+    "**2.3 Recovery-on-startup prompt.** If a recovery file newer than the": [
+      {
+        "executionId": "b9b4ba58-d5e8-4c89-bdc5-48973041751b",
+        "chatSessionId": "sess_530b002f-45ab-4652-afeb-33e9fc9a9db5",
+        "timestamp": 1784054145067
+      },
+      {
+        "executionId": "b9b4ba58-d5e8-4c89-bdc5-48973041751b",
+        "chatSessionId": "sess_530b002f-45ab-4652-afeb-33e9fc9a9db5",
+        "timestamp": 1784056691350
+      }
+    ],
+    "**2.4 Rolling backups.** Timestamped copies under `recovery/` (distinct": [
+      {
+        "executionId": "b9b4ba58-d5e8-4c89-bdc5-48973041751b",
+        "chatSessionId": "sess_530b002f-45ab-4652-afeb-33e9fc9a9db5",
+        "timestamp": 1784056720777
+      },
+      {
+        "executionId": "b9b4ba58-d5e8-4c89-bdc5-48973041751b",
+        "chatSessionId": "sess_530b002f-45ab-4652-afeb-33e9fc9a9db5",
+        "timestamp": 1784057513902
+      }
+    ],
+    "**2.5 Tests.** Recovery-journal restore after simulated crash; save-fail": [
+      {
+        "executionId": "b9b4ba58-d5e8-4c89-bdc5-48973041751b",
+        "chatSessionId": "sess_530b002f-45ab-4652-afeb-33e9fc9a9db5",
+        "timestamp": 1784057538113
+      },
+      {
+        "executionId": "b9b4ba58-d5e8-4c89-bdc5-48973041751b",
+        "chatSessionId": "sess_530b002f-45ab-4652-afeb-33e9fc9a9db5",
+        "timestamp": 1784058752091
+      }
+    ]
+  }
+}

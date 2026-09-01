@@ -15,6 +15,15 @@ Each ADR documents the context, the decision, and its consequences so future con
 | [ADR-005](./ADR-005-bundled-hunspell-spellcheck.md) | Bundled Hunspell dictionary via spellbook (offline spellcheck) | Accepted | 2025-06-15 |
 | [ADR-006](./ADR-006-hand-generated-rtf-manuscript-export.md) | Hand-generated RTF for manuscript export | Accepted | 2025-06-15 |
 | [ADR-007](./ADR-007-dos-accurate-truecolor-themes.md) | DOS-accurate truecolor theme system | Accepted | 2025-06-15 |
+| [ADR-008](./ADR-008-cargo-workspace-restructure.md) | Cargo workspace restructure | Accepted | 2025-07-14 |
+| [ADR-009](./ADR-009-polling-crate-event-loop.md) | Polling crate for lightweight event loop | Accepted | 2025-07-14 |
+| [ADR-010](./ADR-010-cross-platform-mpv-ipc.md) | Cross-platform mpv IPC via trait abstraction | Accepted | 2025-07-14 |
+| [ADR-011](./ADR-011-shell-out-integration-for-radio.md) | Shell-out integration pattern for pstar-radio | Accepted | 2025-07-14 |
+| [ADR-012](./ADR-012-project-manifest-format-and-location.md) | Project manifest format and location | Accepted | 2025-07-14 |
+| [ADR-013](./ADR-013-hand-generated-docx-and-epub.md) | Hand-generated DOCX and EPUB containers | Accepted | 2026-07-14 |
+| [ADR-014](./ADR-014-similar-crate-for-revision-diff.md) | Adopt the `similar` crate for revision diffing | Accepted | 2026-08-19 |
+| [ADR-015](./ADR-015-fixed-bundled-style-rules.md) | Fixed bundled style rules, individually toggleable | Accepted | 2026-08-19 |
+| [ADR-016](./ADR-016-bundled-offline-lookup-resource.md) | Bundled offline lookup resource with typed unavailable state | Accepted | 2026-08-19 |
 
 ## Format
 

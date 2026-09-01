@@ -1,6 +1,6 @@
 [package]
 name = "perfectstar2k"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "A modern TUI homage to WordStar & WordPerfect for DOS — a real writing tool built on WordStar's touch-typist command language and long-hand-page metaphor."
 license = "GPL-3.0-only"
@@ -21,6 +21,7 @@ ratatui = "0.30.2"
 ropey = "1.6.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+similar = "3.2.0"
 spellbook = "0.4.2"
 toml = "1.1.2"
 unicode-segmentation = "1.13.3"

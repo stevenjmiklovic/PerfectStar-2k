@@ -1,0 +1,1 @@
+Cancelling a writing sprint (^OP while one is running) now records the words written and elapsed time up to that point in the session history, matching a sprint that reaches its target. Previously a cancelled sprint reported its figures on screen but discarded them (R3.3, R3.4).
