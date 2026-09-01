@@ -391,10 +391,116 @@ fn prose_words_in_file(path: &Path) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A unique scratch path under the temp dir for testing.
     fn scratch(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("pstar-project-test-{tag}"))
+    }
+
+    fn path_components() -> impl Strategy<Value = PathBuf> {
+        prop::collection::vec("[a-z]{1,8}", 1..4).prop_map(|parts| parts.into_iter().collect())
+    }
+
+    fn relative_or_absolute_path() -> impl Strategy<Value = PathBuf> {
+        prop_oneof![
+            path_components(),
+            path_components().prop_map(|path| {
+                std::env::temp_dir()
+                    .join("pstar-project-property-external")
+                    .join(path)
+            }),
+        ]
+    }
+
+    fn document_spec() -> impl Strategy<Value = (PathBuf, String, bool, DocRole)> {
+        (
+            relative_or_absolute_path(),
+            "[A-Za-z][A-Za-z0-9 _-]{0,20}",
+            any::<bool>(),
+            prop_oneof![Just(DocRole::Manuscript), Just(DocRole::Note)],
+        )
+    }
+
+    static PROPERTY_SCRATCH_ID: AtomicUsize = AtomicUsize::new(0);
+
+    // Feature: pro-writer-10-star, Property 3: Manifest round-trip preserves project structure
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 100,
+            .. ProptestConfig::default()
+        })]
+        #[test]
+        fn manifest_round_trip_preserves_project_structure(
+            name in "[A-Za-z][A-Za-z0-9 _-]{0,20}",
+            docs in prop::collection::vec(document_spec(), 0..8),
+            separator in prop_oneof![
+                Just(Separator::PageBreak),
+                Just(Separator::BlankLines),
+                Just(Separator::HorizontalRule),
+                Just(Separator::None),
+            ],
+        ) {
+            let id = PROPERTY_SCRATCH_ID.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "pstar-project-property-{}-{id}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+
+            let manifest_path = dir.join("project.pstarproj");
+            let manifest = ProjectManifest {
+                name,
+                docs: docs
+                    .iter()
+                    .map(|(path, title, include_in_compile, role)| DocEntry {
+                        path: path.clone(),
+                        title: title.clone(),
+                        include_in_compile: *include_in_compile,
+                        role: *role,
+                    })
+                    .collect(),
+                separator,
+            };
+            let expected_paths: Vec<PathBuf> = manifest
+                .docs
+                .iter()
+                .map(|entry| {
+                    if entry.path.is_relative() {
+                        dir.join(&entry.path)
+                    } else {
+                        entry.path.clone()
+                    }
+                })
+                .collect();
+
+            let project = Project {
+                manifest_path: manifest_path.clone(),
+                manifest,
+            };
+            project.save().unwrap();
+            let loaded = Project::load(&manifest_path).unwrap();
+
+            prop_assert_eq!(loaded.manifest.name, project.manifest.name);
+            prop_assert_eq!(loaded.manifest.separator, project.manifest.separator);
+            prop_assert_eq!(loaded.manifest.docs.len(), project.manifest.docs.len());
+            for ((loaded_doc, original_doc), expected_path) in loaded
+                .manifest
+                .docs
+                .iter()
+                .zip(project.manifest.docs.iter())
+                .zip(expected_paths.iter())
+            {
+                prop_assert_eq!(&loaded_doc.path, expected_path);
+                prop_assert_eq!(&loaded_doc.title, &original_doc.title);
+                prop_assert_eq!(loaded_doc.include_in_compile, original_doc.include_in_compile);
+                prop_assert_eq!(loaded_doc.role, original_doc.role);
+            }
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

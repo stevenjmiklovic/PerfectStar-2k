@@ -2,6 +2,26 @@
 
 <!-- changelogging: start -->
 
+## 0.5.0 (2026-09-01)
+
+The **P1 milestone**: a professional writer's daily workflow now includes snapshots, revision recovery, focused sprints, editorial metadata, style/readability checks, offline lookup and autocorrect, and guided discovery without leaving the keyboard.
+
+### Features
+
+- **Snapshots and revision diff (R4).** Capture named plain-text snapshots, compare revisions, and restore a prior snapshot as one undoable edit without mutating the live buffer during capture.
+- **Writing sprints and focus mode (R3).** Set time and/or word targets, track progress, and record completed or cancelled sprint results in session history.
+- **Editorial metadata and notes (R5, R9).** Persist synopsis, annotations, note documents, and `..` note-line metadata alongside each manuscript without affecting exported prose.
+- **Style and readability checks (R8).** Apply fixed bundled style rules with an overlay for actionable prose feedback.
+- **Offline lookup and autocorrect (R10).** Add bundled dictionary/thesaurus lookup, synonym replacement, autocorrect, and independently toggleable smart typography for quotes, dashes, and ellipses.
+- **First-use hints (R12).** Show non-modal, one-time feature discovery hints that respect the configured help level and dismiss automatically.
+
+### Internal
+
+- Added revision, metadata, style, lookup, and autocorrect modules plus bundled offline resources.
+- Added property-based coverage for snapshot, metadata, and sprint invariants.
+- Added latency and export-throughput harnesses for the release performance budgets.
+- Added ADRs 014–016 for revision diff, fixed style rules, and bundled offline lookup resources.
+
 ## 0.4.0 (2026-07-14)
 
 The **P0 milestone**: a writer can run a whole book in `pstar` and trust it — multi-file project management, professional export, data safety, statistics, and project-wide search.

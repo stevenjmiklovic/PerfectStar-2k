@@ -524,6 +524,7 @@ fn utc_parts(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static SCRATCH: AtomicU64 = AtomicU64::new(0);
@@ -541,6 +542,34 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort();
         names
+    }
+
+    // Feature: pro-writer-10-star, Property 10
+    // Validates: Requirements 4.1, 4.7, 4.8
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn capture_never_mutates_buffer_and_round_trips_as_plain_text(
+            chars in prop::collection::vec(any::<char>(), 0..512),
+        ) {
+            let text: String = chars.into_iter().collect();
+            let rope = Rope::from_str(&text);
+            let before_capture = rope.to_string();
+            let dir = scratch_dir("property-10");
+            let mut store = SnapshotStore::in_dir(dir.clone());
+
+            let entry = store.capture(&rope, None).unwrap();
+            prop_assert_eq!(rope.to_string(), before_capture);
+            prop_assert_eq!(std::fs::read_to_string(store.path_of(&entry)).unwrap(), text.as_str());
+            prop_assert_eq!(store.read_text(&entry).unwrap(), text.as_str());
+
+            let reopened = SnapshotStore::in_dir(dir.clone());
+            let reopened_entry = reopened.latest().expect("captured snapshot is listed");
+            prop_assert_eq!(reopened.read_text(reopened_entry).unwrap(), text.as_str());
+
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

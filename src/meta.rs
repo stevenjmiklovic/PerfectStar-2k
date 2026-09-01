@@ -197,6 +197,7 @@ fn one_line(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static SCRATCH: AtomicU64 = AtomicU64::new(0);
@@ -322,6 +323,52 @@ mod tests {
         assert_eq!(synopsis(&dir, &doc), "recovered");
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // Feature: pro-writer-10-star, Property 14: Sidecar round-trips and a corrupt sidecar reads as empty
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 100,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn sidecar_round_trips_and_corrupt_sidecars_read_as_empty(
+            synopsis in any::<String>(),
+            annotations in prop::collection::vec(
+                (any::<usize>(), any::<usize>(), any::<String>(), any::<bool>())
+                    .prop_map(|(anchor, len, text, orphaned)| Annotation {
+                        anchor,
+                        len,
+                        text,
+                        orphaned,
+                    }),
+                0..8,
+            ),
+            rest_values in prop::collection::vec(any::<String>(), 0..8),
+        ) {
+            let dir = scratch_dir("property-14");
+            let doc = dir.join("chapter.md");
+            let mut expected = DocMeta {
+                synopsis,
+                annotations,
+                ..DocMeta::default()
+            };
+            for (index, value) in rest_values.into_iter().enumerate() {
+                expected.rest.insert(
+                    format!("future_{index}"),
+                    serde_json::Value::String(value),
+                );
+            }
+
+            save(&dir, &doc, &expected).unwrap();
+            assert_eq!(load(&dir, &doc), expected);
+
+            std::fs::write(meta_path(&dir, &doc), b"{ corrupt sidecar").unwrap();
+            assert_eq!(load(&dir, &doc), DocMeta::default());
+
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

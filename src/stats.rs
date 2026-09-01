@@ -97,10 +97,16 @@ impl DocStats {
         self.generation += 1;
         let n = rope.len_lines();
 
-        // If lines were added or removed, rebuild the line vectors.
+        // When an edit adds or removes lines, every subsequent line can shift,
+        // so the old per-line cache no longer maps to the rope. Rebuild it
+        // authoritatively rather than applying deltas against stale indexes.
         if n != self.line_words.len() {
-            self.line_words.resize(n, 0);
-            self.line_chars.resize(n, 0);
+            let generation = self.generation;
+            let last_full_gen = self.last_full_gen;
+            *self = Self::from_rope(rope);
+            self.generation = generation;
+            self.last_full_gen = last_full_gen;
+            return;
         }
 
         let end = to_line.min(n);
@@ -731,5 +737,72 @@ mod tests {
         // 2024-01-01 is 19723 days since epoch
         let (y, m, d) = days_to_date(19723);
         assert_eq!((y, m, d), (2024, 1, 1));
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn text_strategy() -> impl Strategy<Value = String> {
+        prop::collection::vec(
+            prop_oneof![
+                Just(' '),
+                Just('\n'),
+                Just('\t'),
+                Just('#'),
+                Just('*'),
+                Just('_'),
+                Just('.'),
+                Just('a'),
+                Just('Z'),
+                Just('é'),
+                Just('中'),
+                Just('🙂'),
+            ],
+            0..=96,
+        )
+        .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    // Feature: pro-writer-10-star, Property 5
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 128,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn incremental_word_count_matches_full_recount(
+            initial in text_strategy(),
+            edits in prop::collection::vec(
+                (any::<usize>(), any::<usize>(), text_strategy()),
+                1..=64,
+            ),
+        ) {
+            let mut rope = Rope::from_str(&initial);
+            let mut stats = DocStats::from_rope(&rope);
+
+            for (position, delete_len, insert) in edits {
+                let len = rope.len_chars();
+                let at = if len == 0 { 0 } else { position % (len + 1) };
+                let end = at.saturating_add(delete_len).min(len);
+                let from_line = rope.char_to_line(at);
+
+                rope.remove(at..end);
+                rope.insert(at, &insert);
+
+                let inserted_end = at + insert.chars().count();
+                let to_line = rope
+                    .char_to_line(inserted_end.min(rope.len_chars()))
+                    .saturating_add(1);
+                stats.invalidate_lines(&rope, from_line, to_line);
+
+                let full = DocStats::from_rope(&rope);
+                prop_assert_eq!(stats.words, full.words);
+                prop_assert_eq!(stats.chars, full.chars);
+            }
+        }
     }
 }
