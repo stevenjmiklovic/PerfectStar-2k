@@ -97,10 +97,16 @@ impl DocStats {
         self.generation += 1;
         let n = rope.len_lines();
 
-        // If lines were added or removed, rebuild the line vectors.
+        // When an edit adds or removes lines, every subsequent line can shift,
+        // so the old per-line cache no longer maps to the rope. Rebuild it
+        // authoritatively rather than applying deltas against stale indexes.
         if n != self.line_words.len() {
-            self.line_words.resize(n, 0);
-            self.line_chars.resize(n, 0);
+            let generation = self.generation;
+            let last_full_gen = self.last_full_gen;
+            *self = Self::from_rope(rope);
+            self.generation = generation;
+            self.last_full_gen = last_full_gen;
+            return;
         }
 
         let end = to_line.min(n);
@@ -731,5 +737,223 @@ mod tests {
         // 2024-01-01 is 19723 days since epoch
         let (y, m, d) = days_to_date(19723);
         assert_eq!((y, m, d), (2024, 1, 1));
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn text_strategy() -> impl Strategy<Value = String> {
+        prop::collection::vec(
+            prop_oneof![
+                Just(' '),
+                Just('\n'),
+                Just('\t'),
+                Just('#'),
+                Just('*'),
+                Just('_'),
+                Just('.'),
+                Just('a'),
+                Just('Z'),
+                Just('é'),
+                Just('中'),
+                Just('🙂'),
+            ],
+            0..=96,
+        )
+        .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    fn prose_line_strategy() -> impl Strategy<Value = (String, usize, usize)> {
+        let word = prop::string::string_regex("[a-z]{1,8}").expect("valid word regex");
+        prop::collection::vec(word, 1..=4).prop_flat_map(|words| {
+            let content = words.join(" ");
+            let prose_words = words.len();
+            let prose_chars = content.chars().count();
+
+            prop_oneof![
+                Just((content.clone(), prose_words, prose_chars)),
+                Just((format!("## {content}"), prose_words, prose_chars)),
+                Just((format!("**{content}**"), prose_words, prose_chars)),
+                Just((format!("*{content}*"), prose_words, prose_chars)),
+                Just((format!("`{content}`"), prose_words, prose_chars)),
+                Just((format!(".. {content}"), 0, 0)),
+                Just((format!("   .. {content}"), 0, 0)),
+            ]
+        })
+    }
+
+    fn date_strategy() -> impl Strategy<Value = String> {
+        prop::string::string_regex(r"[0-9]{4}-[0-9]{2}-[0-9]{2}").expect("valid date regex")
+    }
+
+    // Feature: pro-writer-10-star, Property 5
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 128,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn incremental_word_count_matches_full_recount(
+            initial in text_strategy(),
+            edits in prop::collection::vec(
+                (any::<usize>(), any::<usize>(), text_strategy()),
+                1..=64,
+            ),
+        ) {
+            let mut rope = Rope::from_str(&initial);
+            let mut stats = DocStats::from_rope(&rope);
+
+            for (position, delete_len, insert) in edits {
+                let len = rope.len_chars();
+                let at = if len == 0 { 0 } else { position % (len + 1) };
+                let end = at.saturating_add(delete_len).min(len);
+                let from_line = rope.char_to_line(at);
+
+                rope.remove(at..end);
+                rope.insert(at, &insert);
+
+                let inserted_end = at + insert.chars().count();
+                let to_line = rope
+                    .char_to_line(inserted_end.min(rope.len_chars()))
+                    .saturating_add(1);
+                stats.invalidate_lines(&rope, from_line, to_line);
+
+                let full = DocStats::from_rope(&rope);
+                prop_assert_eq!(stats.words, full.words);
+                prop_assert_eq!(stats.chars, full.chars);
+            }
+        }
+
+        // Feature: pro-writer-10-star, Property 6
+        #[test]
+        fn prose_count_excludes_note_lines_and_markdown_markers(
+            lines in prop::collection::vec(prose_line_strategy(), 1..=32),
+        ) {
+            let text = lines
+                .iter()
+                .map(|(line, _, _)| line.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let rope = Rope::from_str(&text);
+            let stats = DocStats::from_rope(&rope);
+            let expected_words: usize = lines.iter().map(|(_, words, _)| words).sum();
+            let expected_chars: usize = lines.iter().map(|(_, _, chars)| chars).sum();
+
+            prop_assert_eq!(stats.words, expected_words);
+            prop_assert_eq!(stats.chars, expected_chars);
+
+            for (line, words, chars) in &lines {
+                prop_assert_eq!(prose_words_in_line(line), *words);
+                prop_assert_eq!(prose_chars_in_line(line), *chars);
+            }
+        }
+
+        // Feature: pro-writer-10-star, Property 7
+        #[test]
+        fn session_goal_progress_equals_net_words_since_baseline(
+            baseline in 0usize..=100_000,
+            inserted_words in 0usize..=10_000,
+            deleted_words in 0usize..=100_000,
+            elapsed_minutes in 0usize..MAX_MINUTE_GOAL,
+        ) {
+            // Keep the generated edit valid for a word-count API that accepts
+            // the current count as usize, while still exercising deletions.
+            let deleted_words = deleted_words.min(baseline);
+            let current_words = baseline - deleted_words + inserted_words;
+            let net_words = current_words.saturating_sub(baseline);
+
+            // Exercise all meaningful word-goal boundaries: below, exactly
+            // at, and above the net progress (with minimum target handling).
+            let word_targets = [
+                net_words.saturating_sub(1).max(1),
+                net_words.max(1),
+                net_words.saturating_add(1).min(MAX_WORD_GOAL),
+            ];
+            for target in word_targets {
+                let goal = SessionGoal::new(GoalKind::Words, target, baseline);
+                let (done, reported_target) = goal.progress(current_words);
+                prop_assert_eq!(done, net_words);
+                prop_assert_eq!(reported_target, target);
+                prop_assert_eq!(goal.is_met(current_words), net_words >= target);
+            }
+
+            // Pin elapsed-minute boundaries without sleeping: the one-second
+            // offset keeps the generated elapsed value stable during the test.
+            let elapsed = elapsed_minutes as u64;
+            let start_unix = now_unix().saturating_sub(elapsed * 60 + 1);
+            let minute_targets = [
+                elapsed_minutes.saturating_sub(1).max(1),
+                elapsed_minutes.max(1),
+                elapsed_minutes.saturating_add(1).min(MAX_MINUTE_GOAL),
+            ];
+            for target in minute_targets {
+                let mut goal = SessionGoal::new(GoalKind::Minutes, target, current_words);
+                goal.start_unix = start_unix;
+                let (done, reported_target) = goal.progress(current_words);
+                prop_assert_eq!(done, elapsed_minutes);
+                prop_assert_eq!(reported_target, target);
+                prop_assert_eq!(goal.is_met(current_words), elapsed_minutes >= target);
+            }
+        }
+
+        // Feature: pro-writer-10-star, Property 8
+        #[test]
+        fn daily_history_round_trips_current_and_legacy_shapes(
+            days in prop::collection::btree_map(
+                date_strategy(),
+                -1_000_000i64..=1_000_000,
+                0..=32,
+            ),
+            sprints in prop::collection::vec(
+                (-1_000_000i64..=1_000_000, 0u64..=86_400, any::<bool>()),
+                0..=150,
+            ),
+            legacy_days in prop::collection::btree_map(
+                date_strategy(),
+                -1_000_000i64..=1_000_000,
+                0..=32,
+            ),
+            token in any::<u64>(),
+        ) {
+            let root = std::env::temp_dir().join(format!(
+                "pstar-stats-property8-{}-{token}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            let doc = root.join("chapter.md");
+
+            let mut history = DailyHistory::load_in(Some(root.clone()), Some(&doc));
+            history.entries = days.clone();
+            for (words, seconds, met_target) in sprints {
+                history.record_sprint(words, seconds, met_target);
+            }
+            let expected_sprints = history.sprints.clone();
+            history.save().expect("current history shape saves");
+
+            let history_path = root.join(format!("{}.json", crate::paths::path_key(&doc)));
+            let current_json = std::fs::read_to_string(&history_path)
+                .expect("current history shape is written");
+            let current_file: HistoryFile =
+                serde_json::from_str(&current_json).expect("current history shape parses");
+            prop_assert_eq!(&current_file.days, &days);
+            prop_assert_eq!(&current_file.sprints, &expected_sprints);
+
+            let reloaded = DailyHistory::load_in(Some(root.clone()), Some(&doc));
+            prop_assert_eq!(&reloaded.entries, &days);
+            prop_assert_eq!(&reloaded.sprints, &expected_sprints);
+
+            // The pre-sprint format was a bare date-to-delta JSON object.
+            let legacy_json = serde_json::to_vec(&legacy_days).expect("legacy shape serializes");
+            std::fs::write(&history_path, legacy_json).expect("legacy history shape writes");
+            let legacy = DailyHistory::load_in(Some(root.clone()), Some(&doc));
+            prop_assert_eq!(&legacy.entries, &legacy_days);
+            prop_assert!(legacy.sprints.is_empty());
+
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 }

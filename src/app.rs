@@ -6,6 +6,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use ratatui::DefaultTerminal;
 use ropey::Rope;
 
+use crate::autocorrect::Autocorrect;
 use crate::block::adjust_pos;
 use crate::buffer::wrap_segments;
 use crate::config::Config;
@@ -17,6 +18,7 @@ use crate::export::{self, CompiledDoc, Exporter};
 use crate::history::{Edit, EditGroup, EditKind};
 use crate::keymap::{self, Cmd, Prefix};
 use crate::killring::{KillRing, PutCycle};
+use crate::lookup::{self, LookupState};
 use crate::meta;
 use crate::normalize;
 use crate::outline;
@@ -54,6 +56,11 @@ const GOAL_BANNER: Duration = Duration::from_secs(5);
 /// (R2.1: at least 3 seconds). The writer glances at the number and returns to
 /// typing without the count becoming permanent chrome.
 const COUNT_FLASH: Duration = Duration::from_secs(3);
+
+/// How long a first-use hint stays on screen (R12.3: 4 seconds, or until the
+/// next keypress). Like the other banners it is time-bounded chrome that never
+/// requires dismissal; unlike them it fires at most once per capability.
+const FIRST_USE_HINT: Duration = Duration::from_secs(4);
 
 /// Result of a shared list-navigation key check. Panels call `list_nav_key`
 /// before their own match arms so Up/Down/^E/^X/Esc are handled uniformly.
@@ -174,6 +181,19 @@ pub enum Mode {
     /// Every editorial comment in the document (R9.4).
     Annotations {
         entries: Vec<meta::Annotation>,
+        selected: usize,
+    },
+    /// Thesaurus / definition lookup for the word under the cursor (R10.1,
+    /// R10.2). Dismissed by Esc; selecting a synonym replaces the word as a
+    /// single undoable edit (R10.3).
+    Lookup {
+        /// The word the overlay is about (as it appears under the cursor).
+        word: String,
+        /// Candidate synonyms; empty if the entry has none.
+        synonyms: Vec<String>,
+        /// The definition; empty if the entry has none.
+        definition: String,
+        /// Highlighted synonym in the list.
         selected: usize,
     },
     /// The unified export format picker (R7.2): choose a target, then a path.
@@ -340,6 +360,26 @@ pub struct App {
     pub focus: Option<Focus>,
     /// Whether focus mode dims everything outside the current paragraph (R3.4).
     pub focus_dim: bool,
+    /// The bundled offline thesaurus/definition resource, or a typed
+    /// `Unavailable` (R10.1, R10.2, R10.7). Loaded once at startup.
+    pub lookup: LookupState,
+    /// The autocorrect/expansion engine (R10.4). `None` when the whole feature
+    /// is disabled (`config.autocorrect = false`) so the typing path skips it
+    /// silently rather than testing a flag on every keystroke.
+    pub autocorrect: Option<Autocorrect>,
+    /// Whether smart typographic substitution runs as the writer types (R10.6),
+    /// independent of `autocorrect`.
+    pub smart_typography: bool,
+    /// The current first-use hint and when it landed (R12.3). Kept in its own
+    /// banner rather than `status_msg` for the same reason as the goal/sprint
+    /// banners: `status_msg` is cleared by the very keystroke that would show
+    /// it. This survives the invoking keystroke and auto-dismisses after
+    /// [`FIRST_USE_HINT`] or on the next keypress, whichever comes first.
+    first_use_hint: Option<(String, Instant)>,
+    /// Capabilities whose one-line hint has already been shown, so it never
+    /// reappears (R12.3). Small and append-only; membership is checked once per
+    /// command invocation, off the typing hot path.
+    hinted_cmds: Vec<Cmd>,
 }
 
 /// `App` dereferences to the active pane, so the whole editing engine —
@@ -380,6 +420,34 @@ impl App {
             )
         };
         let start_words = initial_stats.words;
+        // R10 offline resources are compiled into the binary (ADR-016), so they
+        // load deterministically even under `cfg!(test)` — no writer directory
+        // is touched. The thesaurus carries both synonyms and definitions.
+        let lookup = lookup::LookupResource::bundled();
+        // Autocorrect: bundled rules, with an optional user file layered on top
+        // (a later duplicate trigger wins, so user rules override — R10.4). The
+        // whole feature collapses to `None` when disabled, keeping it off the
+        // hot path entirely.
+        let autocorrect = if config.autocorrect {
+            match config
+                .autocorrect_rules
+                .as_deref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+            {
+                // A custom file layers on top of the bundled set: concatenate so
+                // a later duplicate trigger (the user's) wins (R10.4).
+                Some(user) => {
+                    let mut text = String::from(Autocorrect::BUNDLED_RULES);
+                    text.push('\n');
+                    text.push_str(&user);
+                    Some(Autocorrect::from_str(&text))
+                }
+                None => Some(Autocorrect::bundled()),
+            }
+        } else {
+            None
+        };
+        let smart_typography = config.smart_typography;
         let mut app = App {
             panes: vec![pane],
             active: 0,
@@ -448,6 +516,11 @@ impl App {
             sprint_banner: None,
             focus: None,
             focus_dim: config.focus_dim,
+            lookup,
+            autocorrect,
+            smart_typography,
+            first_use_hint: None,
+            hinted_cmds: Vec::new(),
         };
         app.load_annotations(0);
         app.offer_recovery_for_active();
@@ -751,6 +824,42 @@ impl App {
             .map(|(message, _)| message.as_str())
     }
 
+    /// The current first-use hint, while it is still fresh (R12.3). Times out
+    /// after [`FIRST_USE_HINT`]; the next keypress clears it outright (see
+    /// [`handle_key`]).
+    pub fn first_use_hint(&self) -> Option<&str> {
+        self.first_use_hint
+            .as_ref()
+            .filter(|(_, shown)| shown.elapsed() < FIRST_USE_HINT)
+            .map(|(message, _)| message.as_str())
+    }
+
+    /// Set a first-use hint banner directly, for render tests that exercise the
+    /// status-area presentation without driving the whole invoke path.
+    #[cfg(test)]
+    pub fn set_first_use_hint_for_test(&mut self, msg: &str) {
+        self.first_use_hint = Some((msg.to_string(), Instant::now()));
+    }
+
+    /// If `cmd` names a capability that carries a first-use hint, and its hint
+    /// has not been shown before, surface a one-line nudge (R12.3). Suppressed
+    /// entirely while `help_level` is 0 (R12.4) — but the command is still
+    /// recorded as "hinted" so raising the level later never fires a stale
+    /// first-use hint for a capability the writer has already used.
+    fn maybe_first_use_hint(&mut self, cmd: Cmd) {
+        if self.hinted_cmds.contains(&cmd) {
+            return;
+        }
+        let Some(hint) = first_use_hint(cmd) else {
+            return;
+        };
+        self.hinted_cmds.push(cmd);
+        if self.help_level == 0 {
+            return;
+        }
+        self.first_use_hint = Some((hint.to_string(), Instant::now()));
+    }
+
     /// Whether the word/character counts should render this frame (R2.1): either
     /// the always-on display is enabled, or an on-demand reveal is still within
     /// its at-least-3-second window.
@@ -863,6 +972,10 @@ impl App {
             return;
         }
         self.status_msg = None;
+        // R12.3: a first-use hint auto-dismisses on any keypress. Clearing it
+        // here (before dispatch) means a hint set by *this* keystroke's command
+        // survives, while one left over from a previous keystroke is gone.
+        self.first_use_hint = None;
 
         if self.recording && !self.playing {
             self.macro_keys.push(key);
@@ -904,6 +1017,7 @@ impl App {
             Mode::ProjectSearch { .. } => self.handle_project_search_key(key),
             Mode::Revisions { .. } => self.handle_revisions_key(key),
             Mode::Annotations { .. } => self.handle_annotations_key(key),
+            Mode::Lookup { .. } => self.handle_lookup_key(key),
             Mode::ExportMenu { .. } => self.handle_export_menu_key(key),
             Mode::Diff { .. } => self.handle_diff_key(key),
             Mode::Normal => self.handle_normal_key(key),
@@ -940,11 +1054,204 @@ impl App {
             KeyCode::Esc => self.execute(Cmd::Palette),
             KeyCode::Backspace => self.execute(Cmd::DeleteLeft),
             KeyCode::Delete => self.execute(Cmd::DeleteRight),
-            KeyCode::Enter => self.insert_text("\n", EditKind::Other),
+            KeyCode::Enter => self.type_char('\n'),
             KeyCode::Tab => self.insert_text("\t", EditKind::InsertChar),
-            KeyCode::Char(c) => self.insert_text(&c.to_string(), EditKind::InsertChar),
+            KeyCode::Char(c) => self.type_char(c),
             _ => {}
         }
+    }
+
+    /// Type one character in `Mode::Normal`, applying smart typography (R10.6)
+    /// and autocorrect (R10.4) as it goes. Both stay off the hot path: they run
+    /// only when the character is a substitution trigger or a word separator,
+    /// and each fires at most one `HashMap` hit or a fixed-width scan of the
+    /// characters just before the cursor — never a whole-document rescan (R10.8).
+    ///
+    /// Every substitution is applied as a **single undo group** so one ^U
+    /// restores exactly what the writer typed (R10.5): the block-move pattern of
+    /// `apply_raw` per edit followed by `history.record_group`.
+    fn type_char(&mut self, c: char) {
+        // Overtype and non-normal insertion have their own edit shape; keep the
+        // typography/autocorrect path to plain forward typing at the cursor.
+        let can_transform = !self.overtype && self.mode_is_normal_insert();
+
+        // 1) Smart typography: substitute the just-typed char in place, judging
+        //    open/close by the character immediately before the cursor. The
+        //    replacement (dropping any consumed lead chars like the first '-'
+        //    of "--" and emitting the glyph) is one undo group (R10.5/R10.6).
+        if can_transform && self.smart_typography && is_typography_trigger(c) {
+            if let Some((glyph, consumed_before)) = self.smart_sub_for(c) {
+                let cursor_before = self.cursor;
+                let at = self.cursor - consumed_before;
+                let deleted = self.buf.rope.slice(at..self.cursor).to_string();
+                self.apply_raw(at, consumed_before, "");
+                self.apply_raw(at, 0, &glyph.to_string());
+                let after = at + 1;
+                self.history.record_group(
+                    vec![
+                        Edit {
+                            at,
+                            deleted,
+                            inserted: String::new(),
+                        },
+                        Edit {
+                            at,
+                            // Quotes are substituted before the straight
+                            // character enters the buffer. Record that
+                            // logical source character so undo restores what
+                            // the writer typed; dash/ellipsis substitutions
+                            // already consume characters present in the
+                            // buffer and therefore keep this empty.
+                            deleted: if consumed_before == 0 {
+                                c.to_string()
+                            } else {
+                                String::new()
+                            },
+                            inserted: glyph.to_string(),
+                        },
+                    ],
+                    cursor_before,
+                    after,
+                );
+                self.set_cursor(after);
+                return;
+            }
+        }
+
+        // 2) Insert the character normally (coalescing with the typed run).
+        let kind = if c == '\n' {
+            EditKind::Other
+        } else {
+            EditKind::InsertChar
+        };
+        self.insert_text(&c.to_string(), kind);
+
+        // 3) Autocorrect fires on a word separator: the just-typed char ended a
+        //    word. Replace the whole "word + separator" the writer just typed
+        //    with "correction + separator" as ONE undo group, so a single ^U
+        //    puts back exactly what was typed (R10.4, R10.5).
+        if can_transform && is_word_separator(c) {
+            self.maybe_autocorrect();
+        }
+    }
+
+    /// Whether the active mode is normal typing (so transforms are safe).
+    fn mode_is_normal_insert(&self) -> bool {
+        matches!(self.mode, Mode::Normal)
+    }
+
+    /// If a smart-typography substitution applies for the char `c` just typed
+    /// (before it is inserted), return the replacement glyph and how many
+    /// characters immediately before the cursor it also consumes.
+    ///
+    /// This detects runs that *end* at the cursor (the on-type case), which
+    /// [`normalize::smart_char`] does not — that one scans a run forward from a
+    /// fixed index for whole-string smartening. Only a tiny fixed lookback is
+    /// read from the buffer, so this never scans the document (R10.8):
+    ///
+    ///   - `-` completing `--` → em dash, consuming the one `-` before it,
+    ///   - `.` completing `...` → ellipsis, consuming the two `.` before it,
+    ///   - `"`/`'` → curly quote/apostrophe (open or close per the prior char),
+    ///     consuming nothing extra.
+    fn smart_sub_for(&self, c: char) -> Option<(char, usize)> {
+        let cursor = self.cursor;
+        // Chars immediately before the cursor (at most two matter here).
+        let start = cursor.saturating_sub(2);
+        let before: Vec<char> = self.buf.rope.slice(start..cursor).chars().collect();
+        let prev = before.last().copied();
+        match c {
+            '-' => {
+                // `--`: the char before the cursor is also '-'.
+                if prev == Some('-') {
+                    Some(('\u{2014}', 1))
+                } else {
+                    None
+                }
+            }
+            '.' => {
+                // `...`: the two chars before the cursor are both '.'.
+                if before.len() == 2 && before[0] == '.' && before[1] == '.' {
+                    Some(('\u{2026}', 2))
+                } else {
+                    None
+                }
+            }
+            '"' => Some((
+                if normalize::opens_quote(prev) {
+                    '\u{201C}'
+                } else {
+                    '\u{201D}'
+                },
+                0,
+            )),
+            '\'' => Some((
+                if normalize::opens_quote(prev) {
+                    '\u{2018}'
+                } else {
+                    '\u{2019}'
+                },
+                0,
+            )),
+            _ => None,
+        }
+    }
+
+    /// The word separator was just inserted; the cursor sits right after it.
+    /// If the word that precedes the separator has a correction, replace the
+    /// whole "word + separator" span the writer just typed with
+    /// "correction + separator" as **one undo group** whose recorded `deleted`
+    /// is exactly the typed text — so a single ^U restores what was typed,
+    /// separator and all (R10.4, R10.5).
+    ///
+    /// The word is found by a single scan of the current line (no document
+    /// rescan, R10.8) and a single `HashMap` lookup.
+    fn maybe_autocorrect(&mut self) {
+        let Some(ac) = &self.autocorrect else {
+            return; // feature disabled: skip silently.
+        };
+        // The just-typed separator is the char immediately before the cursor.
+        let cursor = self.cursor;
+        if cursor < 2 {
+            return;
+        }
+        let sep_start = self.buf.prev_grapheme(cursor);
+        let sep_str = self.buf.rope.slice(sep_start..cursor).to_string();
+        // The word ends where the separator begins.
+        let line = self.buf.line_of(sep_start);
+        let line_start = self.buf.line_start(line);
+        let text = self.buf.line_text(line);
+        let end_off = sep_start - line_start;
+        let Some((s, e)) = spellcheck::word_spans(&text)
+            .into_iter()
+            .find(|&(s, e)| s != e && e == end_off)
+        else {
+            return;
+        };
+        let word: String = text.chars().skip(s).take(e - s).collect();
+        let Some(correction) = ac.correct_word(&word) else {
+            return;
+        };
+        if correction == word {
+            return;
+        }
+        let word_start = line_start + s;
+        // The span the writer just typed: word + separator. Replace it with
+        // correction + separator, recording the typed span as `deleted`.
+        let typed: String = format!("{word}{sep_str}");
+        let replacement = format!("{correction}{sep_str}");
+        let cursor_before = cursor;
+        self.apply_raw(word_start, typed.chars().count(), &replacement);
+        let cursor_after = word_start + replacement.chars().count();
+        self.history.record_group(
+            vec![Edit {
+                at: word_start,
+                deleted: typed,
+                inserted: replacement,
+            }],
+            cursor_before,
+            cursor_after,
+        );
+        self.set_cursor(cursor_after);
     }
 
     fn handle_palette_key(&mut self, key: KeyEvent) {
@@ -1135,7 +1442,16 @@ impl App {
         }
     }
 
+    /// Run a command, then surface its first-use hint if it has one (R12.3).
+    /// The hint fires *after* dispatch so a command that posts its own status
+    /// message has already done so; the hint lives in its own banner and does
+    /// not clobber that message.
     fn execute(&mut self, cmd: Cmd) {
+        self.dispatch(cmd);
+        self.maybe_first_use_hint(cmd);
+    }
+
+    fn dispatch(&mut self, cmd: Cmd) {
         if cmd != Cmd::Undo {
             self.history.break_chain();
         }
@@ -1563,6 +1879,8 @@ impl App {
                 }));
             }
             Cmd::NextStyleIssue => self.next_style_issue(),
+            Cmd::Thesaurus => self.open_lookup(true),
+            Cmd::Define => self.open_lookup(false),
         }
         if !matches!(cmd, Cmd::Undo) && !is_edit_cmd(cmd) {
             self.history.break_group();
@@ -1842,6 +2160,114 @@ impl App {
             .into_iter()
             .find(|&(s, e)| s != e && offset >= s && offset <= e)
             .map(|(s, e)| text.chars().skip(s).take(e - s).collect())
+    }
+
+    /// The char range of the word touching the cursor (inside it, or right
+    /// after it as when a word was just typed), for in-place replacement. Uses
+    /// the same span finder as [`word_at_cursor`] so the string and the range
+    /// always agree.
+    fn word_range_at_cursor(&self) -> Option<(usize, usize)> {
+        let line = self.buf.line_of(self.cursor);
+        let line_start = self.buf.line_start(line);
+        let text = self.buf.line_text(line);
+        let offset = self.cursor - line_start;
+        spellcheck::word_spans(&text)
+            .into_iter()
+            .find(|&(s, e)| s != e && offset >= s && offset <= e)
+            .map(|(s, e)| (line_start + s, line_start + e))
+    }
+
+    /// ^QL / ^QU: open the lookup overlay for the word under the cursor
+    /// (R10.1, R10.2). `thesaurus` picks which is emphasised, but the bundled
+    /// resource carries both synonyms and a definition, so the overlay shows
+    /// whatever the entry has.
+    ///
+    /// When the resource is unavailable the overlay never opens: a non-blocking
+    /// status message names the missing resource and the command is effectively
+    /// disabled (R10.7). A word that isn't in the resource posts a "no entry"
+    /// status rather than an empty overlay.
+    fn open_lookup(&mut self, thesaurus: bool) {
+        let resource = match self.lookup.resource() {
+            Some(r) => r,
+            None => {
+                // R10.7: name the unavailable resource, disable the command.
+                self.status_msg = self.lookup.unavailable().map(|u| u.message());
+                return;
+            }
+        };
+        let Some(word) = self.word_at_cursor() else {
+            self.status_msg = Some(String::from("No word under the cursor"));
+            return;
+        };
+        let Some(result) = resource.lookup(&word) else {
+            self.status_msg = Some(format!("No entry for “{word}”"));
+            return;
+        };
+        // Both lookups surface both fields; only the "no useful data" case
+        // differs by which command was invoked.
+        if thesaurus && !result.has_synonyms() {
+            self.status_msg = Some(format!("No synonyms for “{word}”"));
+            return;
+        }
+        if !thesaurus && !result.has_definition() {
+            self.status_msg = Some(format!("No definition for “{word}”"));
+            return;
+        }
+        self.mode = Mode::Lookup {
+            word,
+            synonyms: result.synonyms,
+            definition: result.definition,
+            selected: 0,
+        };
+    }
+
+    fn handle_lookup_key(&mut self, key: KeyEvent) {
+        let (count, selected) = match &self.mode {
+            Mode::Lookup {
+                synonyms, selected, ..
+            } => (synonyms.len(), *selected),
+            _ => return,
+        };
+        let last = count.saturating_sub(1);
+        match list_nav_key(&key) {
+            ListNav::Dismiss => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            ListNav::Up => {
+                if let Mode::Lookup { selected, .. } = &mut self.mode {
+                    *selected = selected.saturating_sub(1);
+                }
+                return;
+            }
+            ListNav::Down => {
+                if let Mode::Lookup { selected, .. } = &mut self.mode {
+                    *selected = (*selected + 1).min(last);
+                }
+                return;
+            }
+            ListNav::Other => {}
+        }
+        if key.code == KeyCode::Enter {
+            let choice = match &self.mode {
+                Mode::Lookup { synonyms, .. } => synonyms.get(selected).cloned(),
+                _ => None,
+            };
+            self.mode = Mode::Normal;
+            if let Some(synonym) = choice {
+                self.replace_word_with(&synonym);
+            }
+        }
+    }
+
+    /// Replace the word touching the cursor with `replacement` as a single
+    /// undoable edit (R10.3), leaving the cursor at the end of the new word.
+    fn replace_word_with(&mut self, replacement: &str) {
+        let Some((start, end)) = self.word_range_at_cursor() else {
+            return;
+        };
+        let after = start + replacement.chars().count();
+        self.apply_edit(start, end - start, replacement, EditKind::Other, after);
     }
 
     /// ^QN: the char position of the next misspelled word strictly after the
@@ -2386,11 +2812,26 @@ impl App {
         format: &str,
         _skipped: usize,
     ) {
-        match exporter.export(doc, Path::new(path)) {
+        let output = match Self::absolute_output_path(Path::new(path)) {
+            Ok(output) => output,
+            Err(err) => {
+                self.status_msg = Some(format!("{format} export failed: {err}"));
+                return;
+            }
+        };
+        match exporter.export(doc, &output) {
             Ok(()) => {
-                self.status_msg = Some(format!("{format} exported to {path}"));
+                self.status_msg = Some(format!("{format} exported to {}", output.display()));
             }
             Err(err) => self.status_msg = Some(format!("{format} export failed: {err}")),
+        }
+    }
+
+    fn absolute_output_path(path: &Path) -> std::io::Result<PathBuf> {
+        if path.is_absolute() {
+            Ok(path.to_path_buf())
+        } else {
+            Ok(std::env::current_dir()?.join(path))
         }
     }
 
@@ -2411,7 +2852,10 @@ impl App {
                 .into_iter()
                 .map(|(t, dep)| format!("{} (needs {dep})", t.label()))
                 .collect();
-            self.status_msg = Some(format!("No export formats available: {}", missing.join(", ")));
+            self.status_msg = Some(format!(
+                "No export formats available: {}",
+                missing.join(", ")
+            ));
             return;
         }
         // If any format was omitted for a missing dependency, say so up front so
@@ -2475,25 +2919,27 @@ impl App {
     fn route_export_target(&mut self, target: export::Target) {
         let has_project = self.project.is_some();
         let (label, action) = match target {
-            export::Target::PlainText => (
-                "Export to file (notes stripped)",
-                InputAction::ExportClean,
-            ),
+            export::Target::PlainText => {
+                ("Export to file (notes stripped)", InputAction::ExportClean)
+            }
             export::Target::Rtf => (
                 "Export manuscript RTF to file",
                 InputAction::ExportManuscript,
             ),
-            export::Target::Docx if has_project => {
-                ("Export project DOCX to file", InputAction::ExportProjectDocx)
-            }
+            export::Target::Docx if has_project => (
+                "Export project DOCX to file",
+                InputAction::ExportProjectDocx,
+            ),
             export::Target::Docx => ("Export DOCX to file", InputAction::ExportDocx),
-            export::Target::Epub if has_project => {
-                ("Export project EPUB to file", InputAction::ExportProjectEpub)
-            }
+            export::Target::Epub if has_project => (
+                "Export project EPUB to file",
+                InputAction::ExportProjectEpub,
+            ),
             export::Target::Epub => ("Export EPUB to file", InputAction::ExportEpub),
-            export::Target::Html if has_project => {
-                ("Export project HTML to file", InputAction::ExportProjectHtml)
-            }
+            export::Target::Html if has_project => (
+                "Export project HTML to file",
+                InputAction::ExportProjectHtml,
+            ),
             export::Target::Html => ("Export HTML to file", InputAction::ExportHtml),
         };
         self.mode = Mode::Input {
@@ -3572,9 +4018,16 @@ impl App {
             Some((begin, end)) => self.buf.rope.slice(begin..end).to_string(),
             None => self.buf.rope.to_string(),
         };
+        let readability = if self.style.checks.sentence_words
+            == crate::style::StyleChecks::default().sentence_words
+        {
+            crate::style::readability(&text)
+        } else {
+            crate::style::readability_with_threshold(&text, self.style.checks.sentence_words)
+        };
         StyleReport {
             selection: self.blocks.range().is_some(),
-            readability: crate::style::readability(&text),
+            readability,
             overused: crate::style::word_frequency(&text, 5),
         }
     }
@@ -4360,6 +4813,50 @@ fn is_prefix_key(key: &KeyEvent) -> bool {
             && matches!(c.to_ascii_lowercase(), 'k' | 'q' | 'o' | 'p'))
 }
 
+/// The one-line first-use hint for a new-feature command, if it has one
+/// (R12.3). Returning `None` means the command is a plain editing motion or a
+/// long-standing WordStar chord that needs no onboarding nudge. Only the
+/// capabilities added by the pro-writer features carry a hint; each points the
+/// writer at where the feature lives next, without stealing focus.
+fn first_use_hint(cmd: Cmd) -> Option<&'static str> {
+    Some(match cmd {
+        // R1 Binder / project
+        Cmd::ProjectNew | Cmd::ProjectOpen => "Project loaded — ^PB toggles the binder",
+        Cmd::BinderToggle => "Binder: ↑↓ select, Enter opens, ^PE/^PX reorder",
+        // R2 Statistics & goals
+        Cmd::WordCount => "Word count in the status bar — ^OG sets a session goal",
+        Cmd::SetGoal => "Goal set — progress shows in the status bar as you write",
+        Cmd::StatsOverlay => "Writing stats — daily history and readability at a glance",
+        // R3 Sprints & focus
+        Cmd::SprintStart => "Sprint running — ^OP again stops it, ^OF hides all chrome",
+        Cmd::FocusMode => "Focus mode: text only. ^OF again to bring chrome back",
+        // R4 Snapshots
+        Cmd::Snapshot => "Snapshot saved — ^KO lists revisions and diffs them",
+        Cmd::RevisionsList => "Revisions: Enter diffs, ^R restores an older version",
+        // R5 Notes & annotations neighbours
+        Cmd::EditSynopsis => "Synopsis saved — ^PY shows synopses in the binder",
+        Cmd::OpenNotes => "Notes open in a split — ^OK switches windows",
+        // R6 Project search
+        Cmd::ProjectFind => "Project search: Enter opens a match, ^PW replaces across files",
+        Cmd::ProjectReplace => "Project replace: Y/N per match, A all, Q quit",
+        // R7 Export
+        Cmd::ExportMenu => "Export: pick a format, then confirm the output path",
+        // R8 Style
+        Cmd::ToggleStyle => "Style checks on — ^QI jumps to the next issue",
+        Cmd::NextStyleIssue => "Style issues are marked like spelling — ^QI for the next",
+        // R9 Annotations
+        Cmd::Annotate => "Comment added — ^PG/^PU move between comments, ^PL lists them",
+        Cmd::AnnotationList => "Comments never export — Enter jumps to one",
+        // R10 Dictionary / thesaurus
+        Cmd::Thesaurus => "Thesaurus: Enter replaces the word, Esc closes",
+        Cmd::Define => "Definition lookup — Esc closes the panel",
+        // R12 Help itself
+        Cmd::CycleHelpLevel => "Help level cycles: clean screen → menus → hint bar",
+        Cmd::Palette => "Command palette: type a name or chord, Enter runs it",
+        _ => return None,
+    })
+}
+
 fn is_edit_cmd(cmd: Cmd) -> bool {
     matches!(
         cmd,
@@ -4377,6 +4874,21 @@ fn is_edit_cmd(cmd: Cmd) -> bool {
             | Cmd::Put
             | Cmd::CopyFromOther
     )
+}
+
+/// Whether a typed character can trigger a smart-typography substitution
+/// (R10.6): straight quotes, hyphen (for `--`), and period (for `...`). Cheap
+/// gate so the substitution scan only runs on these characters.
+fn is_typography_trigger(c: char) -> bool {
+    matches!(c, '"' | '\'' | '-' | '.')
+}
+
+/// Whether a typed character ends a word for autocorrect purposes (R10.4):
+/// a separator is anything that is not part of a word span — whitespace,
+/// punctuation, or the Enter newline. Alphanumerics and internal
+/// apostrophes/hyphens are word characters and do not fire autocorrect.
+fn is_word_separator(c: char) -> bool {
+    c == '\n' || (!c.is_alphanumeric() && c != '\'' && c != '-')
 }
 
 fn prefix_caret(prefix: Prefix) -> &'static str {

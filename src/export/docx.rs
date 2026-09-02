@@ -109,4 +109,15 @@ mod tests {
                 .starts_with(b"PK\x03\x04")
         );
     }
+
+    #[test]
+    fn heading_levels_one_through_three_use_word_heading_styles() {
+        let xml = document_xml(&CompiledDoc::from_text("# One\n## Two\n### Three\n"));
+        for level in 1..=3 {
+            assert!(
+                xml.contains(&format!("<w:pStyle w:val=\"Heading{level}\"/>")),
+                "missing Word Heading{level} style in {xml}"
+            );
+        }
+    }
 }

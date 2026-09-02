@@ -254,7 +254,11 @@ pub const TARGETS: &[Target] = &[
 /// whose dependency is unbundled are omitted here and reported separately via
 /// [`unavailable_targets`] (R7.8).
 pub fn available_targets() -> Vec<Target> {
-    TARGETS.iter().copied().filter(|t| t.is_available()).collect()
+    TARGETS
+        .iter()
+        .copied()
+        .filter(|t| t.is_available())
+        .collect()
 }
 
 /// The (target, missing-dependency) pairs omitted from the selection list, so a
@@ -342,6 +346,7 @@ pub(crate) fn escape_xml(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn compiles_structure_emphasis_typography_and_notes() {
@@ -406,6 +411,98 @@ mod tests {
             doc.blocks
                 .iter()
                 .any(|block| matches!(block, Block::PageBreak))
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_order_and_separator_survive_all_exporters() {
+        use crate::project::{DocEntry, DocRole, Project, ProjectManifest, Separator};
+
+        let dir = std::env::temp_dir().join(format!("pstar-export-all-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("first.md"), "# First\n.. private note\nAlpha.\n").unwrap();
+        fs::write(dir.join("second.md"), "# Second\nBravo.\n").unwrap();
+        let project = Project {
+            manifest_path: dir.join("book.pstarproj"),
+            manifest: ProjectManifest {
+                name: String::from("Book"),
+                docs: vec![
+                    DocEntry {
+                        path: dir.join("first.md"),
+                        title: String::from("First"),
+                        include_in_compile: true,
+                        role: DocRole::Manuscript,
+                    },
+                    DocEntry {
+                        path: dir.join("second.md"),
+                        title: String::from("Second"),
+                        include_in_compile: true,
+                        role: DocRole::Manuscript,
+                    },
+                ],
+                separator: Separator::PageBreak,
+            },
+        };
+        let compiled = project.compile();
+        assert!(compiled.skipped.is_empty());
+        let doc = CompiledDoc::from_compiled(&compiled.text);
+        let outputs = [
+            ("DOCX", docx::DocxExporter.render(&doc).unwrap()),
+            ("EPUB", epub::EpubExporter.render(&doc).unwrap()),
+            ("HTML", html::HtmlExporter.render(&doc).unwrap()),
+            ("plain text", html::PlainTextExporter.render(&doc).unwrap()),
+            (
+                "RTF",
+                crate::rtf::RtfExporter {
+                    font: crate::rtf::ManuscriptFont::TimesNewRoman,
+                }
+                .render(&doc)
+                .unwrap(),
+            ),
+        ];
+        for (label, bytes) in &outputs {
+            let first = bytes
+                .windows(b"First".len())
+                .position(|window| window == b"First")
+                .unwrap_or_else(|| panic!("{label} omitted the first document"));
+            let second = bytes
+                .windows(b"Second".len())
+                .position(|window| window == b"Second")
+                .unwrap_or_else(|| panic!("{label} omitted the second document"));
+            assert!(first < second, "{label} changed binder order");
+            assert!(
+                !bytes
+                    .windows(b"private note".len())
+                    .any(|window| window == b"private note"),
+                "{label} exported a note line"
+            );
+        }
+        assert!(
+            outputs[0]
+                .1
+                .windows(b"w:type=\"page\"".len())
+                .any(|w| w == b"w:type=\"page\"")
+        );
+        assert!(
+            outputs[1]
+                .1
+                .windows(b"class=\"page-break\"".len())
+                .any(|w| w == b"class=\"page-break\"")
+        );
+        assert!(
+            outputs[2]
+                .1
+                .windows(b"class=\"page-break\"".len())
+                .any(|w| w == b"class=\"page-break\"")
+        );
+        assert!(outputs[3].1.contains(&b'\x0c'));
+        assert!(
+            outputs[4]
+                .1
+                .windows(b"\\page".len())
+                .any(|w| w == b"\\page")
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -488,6 +585,177 @@ mod tests {
         }
     }
 
+    fn prose_line_strategy() -> impl Strategy<Value = String> {
+        prop::string::string_regex("[a-z]{1,8}")
+            .expect("valid word regex")
+            .prop_map(|word| format!("{word} \"quoted\" wait--stop and wait...stop '{word}'"))
+    }
+
+    fn note_line_strategy() -> impl Strategy<Value = String> {
+        (
+            prop::sample::select(vec!["", " ", "\t  "]),
+            prop::string::string_regex("[a-z]{1,8}").expect("valid word regex"),
+        )
+            .prop_map(|(indent, word)| {
+                format!("{indent}.. NOTE_ONLY_{word} \"secret\" -- hidden...")
+            })
+    }
+
+    fn source_text_strategy() -> impl Strategy<Value = String> {
+        (
+            prose_line_strategy(),
+            prop::collection::vec(
+                (any::<bool>(), prose_line_strategy(), note_line_strategy()),
+                0..=8,
+            ),
+        )
+            .prop_map(|(first_prose, rest)| {
+                let mut lines = vec![first_prose];
+                lines.extend(
+                    rest.into_iter()
+                        .map(|(is_note, prose, note)| if is_note { note } else { prose }),
+                );
+                format!("{}\n", lines.join("\n"))
+            })
+    }
+
+    // Feature: pro-writer-10-star, Property 17: Annotations never reach a prose export
+    // Validates: Requirements 9.3
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn annotation_bodies_never_reach_any_prose_export(
+            source in source_text_strategy(),
+            annotation_bodies in prop::collection::vec(
+                prop::string::string_regex("[a-z]{1,24}").expect("valid annotation body regex"),
+                1..=8,
+            ),
+        ) {
+            let mut sidecar = crate::meta::DocMeta::default();
+            sidecar.annotations = annotation_bodies
+                .iter()
+                .enumerate()
+                .map(|(index, body)| {
+                    crate::meta::Annotation::new(
+                        index,
+                        0,
+                        format!("ANNOTATION_BODY_{index}_{body}"),
+                    )
+                })
+                .collect();
+            let doc = CompiledDoc::from_text(&source);
+            let outputs = [
+                ("DOCX", docx::DocxExporter.render(&doc).unwrap()),
+                ("EPUB", epub::EpubExporter.render(&doc).unwrap()),
+                ("HTML", html::HtmlExporter.render(&doc).unwrap()),
+                ("plain text", html::PlainTextExporter.render(&doc).unwrap()),
+                (
+                    "RTF",
+                    crate::rtf::RtfExporter {
+                        font: crate::rtf::ManuscriptFont::TimesNewRoman,
+                    }
+                    .render(&doc)
+                    .unwrap(),
+                ),
+            ];
+
+            prop_assert_eq!(sidecar.annotations.len(), annotation_bodies.len());
+            for annotation in &sidecar.annotations {
+                for (label, output) in &outputs {
+                    prop_assert!(
+                        !output
+                            .windows(annotation.text.len())
+                            .any(|window| window == annotation.text.as_bytes()),
+                        "{label} exported annotation body {:?}",
+                        annotation.text,
+                    );
+                }
+            }
+        }
+    }
+
+    // Feature: pro-writer-10-star, Property 18: Export normalization strips notes and upgrades typography
+    // Validates: Requirements 7.5, 7.7
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn export_normalization_strips_notes_and_upgrades_typography(
+            source in source_text_strategy(),
+        ) {
+            let doc = CompiledDoc::from_text(&source);
+            let expected: Vec<String> = source
+                .lines()
+                .filter(|line| !normalize::is_note_line(line))
+                .map(normalize::smart_typography)
+                .collect();
+            let actual: Vec<String> = doc
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    Block::Paragraph(runs) | Block::Heading { runs, .. } => {
+                        Some(runs_text(runs))
+                    }
+                    Block::PageBreak | Block::Separator => None,
+                })
+                .collect();
+
+            prop_assert_eq!(&actual, &expected);
+            prop_assert!(
+                !actual.iter().any(|line| line.contains("NOTE_ONLY_")),
+                "note-only source lines must not reach the normalized export model"
+            );
+            let open_quote = '\u{201c}';
+            let close_quote = '\u{201d}';
+            let em_dash = '\u{2014}';
+            let ellipsis = '\u{2026}';
+            prop_assert!(actual.iter().all(|line| line.contains(open_quote)));
+            prop_assert!(actual.iter().all(|line| line.contains(close_quote)));
+            prop_assert!(actual.iter().all(|line| line.contains(em_dash)));
+            prop_assert!(actual.iter().all(|line| line.contains(ellipsis)));
+        }
+    }
+
+    // Feature: pro-writer-10-star, Property 19: Failed export preserves any previously exported file
+    // Validates: Requirements 7.9
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn failed_export_preserves_any_previous_output(
+            previous_output in prop::collection::vec(any::<u8>(), 0..=256),
+            partial_output in prop::collection::vec(any::<u8>(), 1..=256),
+        ) {
+            let dir = std::env::temp_dir().join(format!(
+                "pstar-export-failure-property-{}",
+                std::process::id(),
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let out = dir.join("book.export");
+            fs::write(&out, &previous_output).unwrap();
+
+            let err = atomic_export_with(&out, |file| {
+                file.write_all(&partial_output)?;
+                Err(io::Error::other("simulated renderer failure"))
+            });
+            prop_assert!(err.is_err());
+            prop_assert_eq!(fs::read(&out).unwrap(), previous_output);
+
+            let leftovers: Vec<_> = fs::read_dir(&dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .filter(|name| name.to_string_lossy().contains("pstar-export"))
+                .collect();
+            prop_assert!(
+                leftovers.is_empty(),
+                "temporary export files remain: {leftovers:?}"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
     #[test]
     fn failed_atomic_export_preserves_previous_output() {
         let dir = std::env::temp_dir().join(format!("pstar-export-failure-{}", std::process::id()));
@@ -502,6 +770,15 @@ mod tests {
         });
         assert!(err.is_err());
         assert_eq!(fs::read(&out).unwrap(), b"previous good export");
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().contains("pstar-export"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temporary export files remain: {leftovers:?}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -160,6 +160,11 @@ pub enum Cmd {
     ToggleStyle,
     /// Jump to the next style issue, as ^QN does for spelling (R8.3).
     NextStyleIssue,
+    /// Dictionary / thesaurus (R10)
+    /// Look up synonyms for the word at the cursor or selection (R10.1).
+    Thesaurus,
+    /// Look up the definition of the word at the cursor or selection (R10.2).
+    Define,
 }
 
 /// How a command is typed.
@@ -345,6 +350,20 @@ pub const BINDINGS: &[Binding] = &[
         cmd: Cmd::NextStyleIssue,
         chord: Pref(Q, 'i'),
         name: "next style issue",
+    },
+    // Dictionary/thesaurus lookups sit with the other "look up the word here"
+    // ^Q commands (next-misspelling, next-style-issue). ^QL reads as "Look up"
+    // and ^QU as "Understand/definition"; both are free ^Q letters (R10.1,
+    // R10.2).
+    Binding {
+        cmd: Cmd::Thesaurus,
+        chord: Pref(Q, 'l'),
+        name: "thesaurus (synonyms)",
+    },
+    Binding {
+        cmd: Cmd::Define,
+        chord: Pref(Q, 'u'),
+        name: "define word",
     },
     Binding {
         cmd: Cmd::FindIncremental,
@@ -778,6 +797,7 @@ pub fn menu_entries(prefix: Prefix) -> Vec<(char, &'static str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn project_prefix_has_a_label() {
@@ -815,14 +835,74 @@ mod tests {
 
     #[test]
     fn every_command_is_reachable_by_name_in_the_palette() {
-        // R12.1/R12.4: the palette is generated from BINDINGS, so a command
-        // with a chord but no descriptive name would ship undiscoverable.
+        // R12.1/R12.5: the palette is generated from BINDINGS, so *every*
+        // bound command must surface by a non-empty descriptive name with a
+        // rendered chord — otherwise a feature ships undiscoverable. This is
+        // the comprehensive guarantee, not a spot check of a few commands.
         let entries = palette_entries();
-        for cmd in [Cmd::Snapshot, Cmd::RevisionsList] {
-            let entry = entries.iter().find(|(c, _, _)| *c == cmd);
-            let (_, name, chord) = entry.expect("command missing from palette");
-            assert!(!name.is_empty(), "{cmd:?} has no name");
-            assert!(chord.starts_with("^K"), "{cmd:?} chord is {chord}");
+        for b in BINDINGS {
+            let entry = entries
+                .iter()
+                .find(|(c, _, _)| *c == b.cmd)
+                .unwrap_or_else(|| panic!("{:?} bound but missing from palette", b.cmd));
+            let (_, name, chord) = entry;
+            assert!(!name.trim().is_empty(), "{:?} has no palette name", b.cmd);
+            assert!(
+                chord.starts_with('^'),
+                "{:?} chord {chord} is not a rendered chord",
+                b.cmd
+            );
+            // The command is also findable by typing its own name into the
+            // palette query (R12.5: reachable by descriptive name).
+            assert!(
+                filtered_entries(name).iter().any(|(c, _, _)| c == &b.cmd),
+                "{:?} not found by searching its own name {name:?}",
+                b.cmd
+            );
+        }
+    }
+
+    #[test]
+    fn r10_and_export_menu_commands_surface_in_their_prefix_menus_by_name() {
+        // R12.1: the recently added R10 lookups (^QL, ^QU) and the unified
+        // export picker (^KF) must appear by descriptive name in the delayed
+        // prefix menu for their prefix — the menu is what a level-1 user sees.
+        let q_menu = menu_entries(Prefix::Q);
+        let thesaurus = q_menu.iter().find(|(k, _)| *k == 'l');
+        let define = q_menu.iter().find(|(k, _)| *k == 'u');
+        assert_eq!(thesaurus.map(|(_, n)| *n), Some("thesaurus (synonyms)"));
+        assert_eq!(define.map(|(_, n)| *n), Some("define word"));
+
+        let k_menu = menu_entries(Prefix::K);
+        let export_menu = k_menu.iter().find(|(k, _)| *k == 'f');
+        assert_eq!(export_menu.map(|(_, n)| *n), Some("export (choose format)"));
+
+        // And each is reachable by name in the palette too (keyboard-only
+        // discoverability, R12.5).
+        for cmd in [Cmd::Thesaurus, Cmd::Define, Cmd::ExportMenu] {
+            assert!(
+                palette_entries()
+                    .iter()
+                    .any(|(c, name, _)| *c == cmd && !name.is_empty()),
+                "{cmd:?} not reachable by name in the palette"
+            );
+        }
+    }
+
+    #[test]
+    fn every_prefixed_command_appears_in_its_prefix_menu() {
+        // R12.1/R12.2: a level-1 user discovers prefixed commands through the
+        // delayed prefix menu. Every Pref(...) binding must therefore surface
+        // in menu_entries for its prefix.
+        for b in BINDINGS {
+            if let Pref(prefix, _) = b.chord {
+                assert!(
+                    menu_entries(prefix).iter().any(|(_, name)| *name == b.name),
+                    "{:?} ({}) missing from its prefix menu",
+                    b.cmd,
+                    b.name
+                );
+            }
         }
     }
 
@@ -842,6 +922,94 @@ mod tests {
                 .iter()
                 .any(|(c, name, _)| *c == Cmd::ExportMenu && !name.is_empty())
         );
+    }
+
+    #[test]
+    fn lookup_commands_are_bound_without_stealing_a_chord() {
+        // R10.1/R10.2: ^QL and ^QU resolve to the lookup commands, and the
+        // existing ^Q bindings they sit beside are untouched.
+        assert_eq!(lookup_prefixed(Prefix::Q, 'l'), Some(Cmd::Thesaurus));
+        assert_eq!(lookup_prefixed(Prefix::Q, 'u'), Some(Cmd::Define));
+        // Neighbouring ^Q commands keep their chords.
+        assert_eq!(lookup_prefixed(Prefix::Q, 'n'), Some(Cmd::NextMisspelling));
+        assert_eq!(lookup_prefixed(Prefix::Q, 'i'), Some(Cmd::NextStyleIssue));
+        assert_eq!(lookup_prefixed(Prefix::Q, 'o'), Some(Cmd::Outline));
+        assert_eq!(lookup_prefixed(Prefix::Q, 'f'), Some(Cmd::FindIncremental));
+        // ^L bare (find next) is a different namespace and stays put.
+        assert_eq!(lookup_bare('l'), Some(Cmd::FindNext));
+    }
+
+    #[test]
+    fn lookup_commands_are_reachable_by_name_in_the_palette() {
+        // R12.1: the palette/menu/help are generated from BINDINGS, so the new
+        // R10 commands must appear by name with their ^Q chord.
+        let entries = palette_entries();
+        for cmd in [Cmd::Thesaurus, Cmd::Define] {
+            let entry = entries.iter().find(|(c, _, _)| *c == cmd);
+            let (_, name, chord) = entry.expect("lookup command missing from palette");
+            assert!(!name.is_empty(), "{cmd:?} has no name");
+            assert!(chord.starts_with("^Q"), "{cmd:?} chord is {chord}");
+        }
+        // They also show up in the ^Q prefix menu.
+        let q_menu = menu_entries(Prefix::Q);
+        assert!(q_menu.iter().any(|(k, _)| *k == 'l'));
+        assert!(q_menu.iter().any(|(k, _)| *k == 'u'));
+    }
+
+    // Feature: pro-writer-10-star, Property 23: Every command is reachable by name in the palette
+    // Validates: Requirements 12.1, 12.5
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn palette_reachability_and_deduplication_property(
+            uppercase_query in any::<bool>(),
+        ) {
+            let entries = palette_entries();
+            let mut unique_commands = Vec::new();
+            for binding in BINDINGS {
+                if !unique_commands.contains(&binding.cmd) {
+                    unique_commands.push(binding.cmd);
+                }
+            }
+
+            prop_assert_eq!(
+                entries.len(),
+                unique_commands.len(),
+                "palette entries must contain exactly one entry per bound command",
+            );
+
+            let mut seen_commands = Vec::new();
+            for (command, _, _) in &entries {
+                prop_assert!(
+                    !seen_commands.contains(command),
+                    "palette contains duplicate entry for {command:?}",
+                );
+                seen_commands.push(*command);
+            }
+
+            for binding in BINDINGS {
+                let query = if uppercase_query {
+                    binding.name.to_ascii_uppercase()
+                } else {
+                    binding.name.to_owned()
+                };
+                prop_assert!(
+                    entries.iter().any(|(command, _, chord)| {
+                        *command == binding.cmd && chord.starts_with('^')
+                    }),
+                    "{command:?} is missing from the palette",
+                    command = binding.cmd,
+                );
+                prop_assert!(
+                    filtered_entries(&query)
+                        .iter()
+                        .any(|(command, _, _)| *command == binding.cmd),
+                    "{command:?} is not reachable by name {query:?}",
+                    command = binding.cmd,
+                );
+            }
+        }
     }
 
     #[test]

@@ -1550,7 +1550,8 @@ fn cancelling_a_sprint_records_its_partial_figures() {
     // R3.3: the summary outlives the keystroke that would clear an ordinary
     // status message, so a writer who cancels mid-word still sees it.
     assert!(
-        app.sprint_banner().is_some_and(|b| b.contains("Sprint stopped")),
+        app.sprint_banner()
+            .is_some_and(|b| b.contains("Sprint stopped")),
         "the stopped-sprint summary is non-modal and persistent"
     );
 
@@ -2190,6 +2191,26 @@ fn navigation_walks_comments_and_the_list_jumps_to_them() {
 }
 
 #[test]
+fn export_success_reports_an_absolute_output_path() {
+    let relative = format!("pstar-export-status-{}.html", std::process::id());
+    let output = std::env::current_dir().unwrap().join(&relative);
+    let _ = std::fs::remove_file(&output);
+
+    let mut app = App::new(None).unwrap();
+    app.splash = false;
+    app.execute(Cmd::ExportHtml);
+    typed(&mut app, &relative);
+    app.handle_key(plain(KeyCode::Enter));
+
+    assert_eq!(
+        app.status_msg.as_deref(),
+        Some(format!("HTML exported to {}", output.display()).as_str())
+    );
+    assert!(output.is_file());
+    let _ = std::fs::remove_file(output);
+}
+
+#[test]
 fn comments_never_reach_an_export() {
     // R9.3. They can't: the text lives in the sidecar, not the document. This
     // guards that no future path smuggles it into the compiled prose.
@@ -2301,6 +2322,27 @@ fn next_style_issue_walks_the_document_like_next_misspelling() {
 }
 
 #[test]
+fn next_style_issue_wraps_from_the_end_to_the_first_issue() {
+    let (dir, _source, mut app) =
+        test_app("style-wrap", "She walked quietly.\nThe door was closed.\n");
+    app.execute(Cmd::ToggleStyle);
+    app.set_cursor(app.buf.len_chars());
+    app.execute(Cmd::NextStyleIssue);
+
+    assert_eq!(
+        app.cursor, 11,
+        "wraparound should return to the first issue"
+    );
+    assert!(
+        app.status_msg.as_ref().unwrap().contains("adverb"),
+        "{:?}",
+        app.status_msg
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn a_clean_document_reports_no_style_issues() {
     let (dir, _source, mut app) = test_app("style-clean", "He took the knife. She left.\n");
     app.execute(Cmd::ToggleStyle);
@@ -2370,6 +2412,27 @@ fn readability_and_overused_words_are_computed_when_the_overlay_opens() {
     let report = app.style_report.clone().unwrap();
     assert!(report.selection);
     assert_eq!(report.readability.sentences, 1);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn readability_overlay_uses_configured_long_sentence_threshold() {
+    // R8.4/R8.7: the overlay must use the configured threshold, not only the
+    // default used by the standalone readability helper.
+    let (dir, _source, mut app) = test_app(
+        "style-threshold",
+        "One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty one. Short sentence.\n",
+    );
+    app.style.checks.sentence_words = 20;
+
+    app.execute(Cmd::StatsOverlay);
+
+    let report = app
+        .style_report
+        .clone()
+        .expect("the overlay computes figures");
+    assert_eq!(report.readability.long_sentence_percent, 50.0);
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -2857,7 +2920,10 @@ fn export_menu_opens_and_lists_all_five_available_formats() {
 
     // Toggle semantics: a second ^KF closes the picker.
     app.execute(Cmd::ExportMenu);
-    assert!(matches!(app.mode, Mode::Normal), "second ^KF closes the menu");
+    assert!(
+        matches!(app.mode, Mode::Normal),
+        "second ^KF closes the menu"
+    );
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -2916,4 +2982,327 @@ fn export_menu_routes_rich_formats_to_project_actions_when_a_project_is_loaded()
 
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+// ---- R10: Dictionary, Thesaurus, Autocorrect (task 13.5) --------------------
+
+#[test]
+fn thesaurus_opens_overlay_and_synonym_replaces_word_as_one_undo() {
+    // R10.1, R10.3, R10.5: the lookup overlay shows synonyms for a known word,
+    // choosing one replaces it as a single undoable edit.
+    let (_dir, _source, mut app) = test_app("lookup-thes", "I am happy today\n");
+    app.set_cursor(5); // inside "happy"
+
+    app.execute(Cmd::Thesaurus);
+    match &app.mode {
+        Mode::Lookup { word, synonyms, .. } => {
+            assert_eq!(word, "happy");
+            assert!(synonyms.contains(&"joyful".to_string()), "got {synonyms:?}");
+        }
+        _ => panic!("expected Lookup mode"),
+    }
+
+    // Select "joyful" — find its index.
+    let idx = match &app.mode {
+        Mode::Lookup { synonyms, .. } => synonyms
+            .iter()
+            .position(|s| s == "joyful")
+            .expect("joyful in list"),
+        _ => unreachable!(),
+    };
+    if let Mode::Lookup { selected, .. } = &mut app.mode {
+        *selected = idx;
+    }
+    app.handle_lookup_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    // Back in Normal mode, "happy" replaced with "joyful".
+    assert!(matches!(app.mode, Mode::Normal));
+    assert!(
+        app.buf.rope.to_string().contains("joyful"),
+        "got {}",
+        app.buf.rope.to_string()
+    );
+    assert!(!app.buf.rope.to_string().contains("happy"));
+
+    // ONE undo restores the original text.
+    app.execute(Cmd::Undo);
+    assert!(
+        app.buf.rope.to_string().contains("happy"),
+        "after undo: {}",
+        app.buf.rope.to_string()
+    );
+}
+
+#[test]
+fn define_surfaces_definition() {
+    // R10.2: definition lookup shows a definition for a known word.
+    let (_dir, _source, mut app) = test_app("lookup-def", "abandon ship\n");
+    app.set_cursor(3); // inside "abandon"
+
+    app.execute(Cmd::Define);
+    match &app.mode {
+        Mode::Lookup {
+            word, definition, ..
+        } => {
+            assert_eq!(word, "abandon");
+            assert!(!definition.is_empty(), "expected a definition");
+            assert!(
+                definition.to_lowercase().contains("give up"),
+                "got {definition}"
+            );
+        }
+        _ => panic!("expected Lookup mode"),
+    }
+}
+
+#[test]
+fn unknown_word_posts_status_without_opening_overlay() {
+    // R10.1/R10.2: a miss on an unknown word posts a "no entry" status, no overlay.
+    let (_dir, _source, mut app) = test_app("lookup-miss", "zznotaword\n");
+    app.set_cursor(3);
+
+    app.execute(Cmd::Thesaurus);
+    assert!(matches!(app.mode, Mode::Normal), "overlay must not open");
+    assert!(
+        app.status_msg
+            .as_deref()
+            .unwrap()
+            .to_lowercase()
+            .contains("no"),
+        "got {:?}",
+        app.status_msg
+    );
+}
+
+#[test]
+fn autocorrect_fires_on_separator_and_one_undo_restores_typed_text() {
+    // R10.4, R10.5: typing "teh " corrects to "the "; one undo restores "teh ".
+    let (_dir, _source, mut app) = test_app("ac-basic", "");
+
+    // Type "teh" then space via handle_key in Normal mode.
+    for c in "teh".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    // The buffer should be "teh" before the separator.
+    assert_eq!(app.buf.rope.to_string(), "teh");
+
+    // Typing space triggers autocorrect.
+    app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    assert_eq!(
+        app.buf.rope.to_string(),
+        "the ",
+        "autocorrect should fire on space"
+    );
+
+    // R10.5: ONE undo immediately after the substitution restores exactly the
+    // text the writer typed — the misspelled word AND the separator.
+    app.execute(Cmd::Undo);
+    assert_eq!(
+        app.buf.rope.to_string(),
+        "teh ",
+        "one undo should restore the typed text (misspelling + separator)"
+    );
+}
+
+#[test]
+fn each_smart_typography_substitution_is_one_undoable_edit() {
+    // R10.6: each straight-typography substitution is recorded as one edit,
+    // so an immediate undo restores the characters typed before substitution.
+    let (_dir, _source, mut quotes) = test_app("typo-quotes", "");
+    for c in "\"".chars() {
+        quotes.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert_eq!(quotes.buf.rope.to_string(), "\u{201C}");
+    quotes.execute(Cmd::Undo);
+    assert_eq!(
+        quotes.buf.rope.to_string(),
+        "\"",
+        "one undo should restore a straight quote"
+    );
+
+    let (_dir2, _source2, mut dash) = test_app("typo-dash", "wait");
+    dash.set_cursor(4);
+    for c in "--".chars() {
+        dash.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert_eq!(dash.buf.rope.to_string(), "wait\u{2014}");
+    dash.execute(Cmd::Undo);
+    assert_eq!(
+        dash.buf.rope.to_string(),
+        "wait-",
+        "one undo should restore the second typed hyphen"
+    );
+
+    let (_dir3, _source3, mut ellipsis) = test_app("typo-ellipsis", "er");
+    ellipsis.set_cursor(2);
+    for c in "...".chars() {
+        ellipsis.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert_eq!(ellipsis.buf.rope.to_string(), "er\u{2026}");
+    ellipsis.execute(Cmd::Undo);
+    assert_eq!(
+        ellipsis.buf.rope.to_string(),
+        "er..",
+        "one undo should restore the two periods consumed by ellipsis"
+    );
+}
+
+#[test]
+fn smart_typography_respects_config_flag() {
+    // R10.6: smart typography is independently toggleable.
+    let (_dir, _source, mut app) = test_app("typo-off", "");
+    app.smart_typography = false;
+
+    for c in "\"hi\"".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert_eq!(
+        app.buf.rope.to_string(),
+        "\"hi\"",
+        "with flag off, no curly conversion"
+    );
+}
+
+#[test]
+fn autocorrect_respects_config_flag() {
+    // R10.4: autocorrect is globally disable-able.
+    let (_dir, _source, mut app) = test_app("ac-off", "");
+    app.autocorrect = None; // feature disabled
+
+    for c in "teh ".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert_eq!(
+        app.buf.rope.to_string(),
+        "teh ",
+        "with autocorrect disabled, no correction"
+    );
+}
+
+#[test]
+fn unavailable_lookup_disables_each_command_without_error() {
+    // R10.7: an unavailable resource leaves lookup commands inert while
+    // reporting a non-blocking status message naming the missing resource.
+    let (_dir, _source, mut app) = test_app("lookup-unavail", "hello world\n");
+    app.set_cursor(2);
+    app.lookup = lookup::LookupResource::from_str("");
+
+    for command in [Cmd::Thesaurus, Cmd::Define] {
+        app.execute(command);
+        assert!(
+            matches!(app.mode, Mode::Normal),
+            "{command:?} must remain disabled when lookup is unavailable"
+        );
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("thesaurus unavailable: resource contains no entries"),
+            "{command:?} should report the unavailable resource, not an error"
+        );
+    }
+}
+
+// --- Phase 14: discoverability — help levels and first-use hints (R12) ----
+
+/// A bare app with the splash cleared and a known help level, for hint tests.
+fn help_app(help_level: u8) -> App {
+    let mut app = App::new(None).unwrap();
+    app.splash = false;
+    app.help_level = help_level;
+    app
+}
+
+#[test]
+fn cycle_help_level_wraps_through_the_three_levels() {
+    // R12.2: help_level takes values 0 (clean), 1 (delayed menus), 2 (hint bar).
+    let mut app = help_app(0);
+    app.execute(Cmd::CycleHelpLevel);
+    assert_eq!(app.help_level, 1);
+    app.execute(Cmd::CycleHelpLevel);
+    assert_eq!(app.help_level, 2);
+    app.execute(Cmd::CycleHelpLevel);
+    assert_eq!(app.help_level, 0, "wraps back to a clean screen");
+}
+
+#[test]
+fn a_new_capability_shows_a_first_use_hint_once() {
+    // R12.3: invoking a new capability for the first time surfaces a one-line
+    // hint. It does not steal focus (mode stays Normal) and does not reappear.
+    let mut app = help_app(1);
+    // Give the thesaurus a resource so the command's own path is benign; the
+    // hint fires regardless of what the command itself does.
+    app.execute(Cmd::WordCount);
+    assert!(
+        app.first_use_hint().is_some(),
+        "first invocation should post a hint"
+    );
+
+    // A second invocation posts no hint — it has been shown once (R12.3).
+    app.first_use_hint = None;
+    app.execute(Cmd::WordCount);
+    assert!(
+        app.first_use_hint().is_none(),
+        "the hint must not reappear for a capability already used"
+    );
+}
+
+#[test]
+fn help_level_0_suppresses_first_use_hints_entirely() {
+    // R12.4: at level 0 no first-use hint is shown, even the very first time.
+    let mut app = help_app(0);
+    app.execute(Cmd::WordCount);
+    assert!(
+        app.first_use_hint().is_none(),
+        "level 0 suppresses all first-use hints"
+    );
+}
+
+#[test]
+fn a_capability_used_silently_at_level_0_never_hints_after_raising_the_level() {
+    // R12.4: using a capability while hints are suppressed still marks it seen,
+    // so raising the help level later does not fire a stale first-use hint.
+    let mut app = help_app(0);
+    app.execute(Cmd::WordCount); // suppressed, but recorded as used
+
+    app.help_level = 2;
+    app.execute(Cmd::WordCount);
+    assert!(
+        app.first_use_hint().is_none(),
+        "no stale hint for a capability already used at level 0"
+    );
+}
+
+#[test]
+fn a_first_use_hint_is_dismissed_by_the_next_keypress() {
+    // R12.3: the hint auto-dismisses immediately on any keypress. The keystroke
+    // that triggers the command keeps its hint; the *next* keystroke clears it.
+    let mut app = help_app(1);
+    // ^OC toggles the word count; the ^O prefix then 'c' invokes it.
+    app.handle_key(ctrl('o'));
+    app.handle_key(plain(KeyCode::Char('c')));
+    assert!(
+        app.first_use_hint().is_some(),
+        "the invoking chord leaves the hint visible"
+    );
+
+    // Any further keypress clears it.
+    app.handle_key(plain(KeyCode::Left));
+    assert!(
+        app.first_use_hint().is_none(),
+        "the next keypress dismisses the hint"
+    );
+}
+
+#[test]
+fn plain_editing_motions_carry_no_first_use_hint() {
+    // R12.3 is about *new capabilities*; the diamond and long-standing chords
+    // should never nag. Cursor motion posts nothing.
+    let mut app = help_app(2);
+    app.buf.insert(0, "some prose here\n");
+    app.execute(Cmd::Right);
+    app.execute(Cmd::WordRight);
+    app.execute(Cmd::Down);
+    assert!(
+        app.first_use_hint().is_none(),
+        "movement is not a hint-worthy capability"
+    );
 }

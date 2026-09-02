@@ -115,6 +115,7 @@ fn prune_backups(dir: &Path, depth: usize) -> io::Result<()> {
 #[cfg(test)]
 mod rolling_backup_tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn scratch_dir(tag: &str) -> PathBuf {
         let id = UNTITLED_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -201,6 +202,64 @@ mod rolling_backup_tests {
         assert_eq!(std::fs::read_to_string(&before[0]).unwrap(), "kept");
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // Feature: pro-writer-10-star, Property 21: Rolling-backup rotation keeps the newest N and depth 0 disables without deleting
+    // Validates: Requirements 11.3
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn rolling_backup_rotation_keeps_newest_n_and_depth_zero_preserves_existing(
+            depth in 0usize..=16,
+            sequence in prop::collection::vec("[a-z]{1,24}", 1..=24),
+        ) {
+            let dir = scratch_dir("property-21");
+            let root = dir.join("recovery");
+            let source = dir.join("chapter.md");
+            std::fs::create_dir_all(&dir).unwrap();
+
+            std::fs::write(&source, "seed").unwrap();
+            write_rolling_backup(&root, &source, 1).unwrap();
+            let existing = backup_files(&root, &source)
+                .into_iter()
+                .map(|path| (path.clone(), std::fs::read_to_string(path).unwrap()))
+                .collect::<Vec<_>>();
+
+            let mut expected_contents = vec![String::from("seed")];
+            for (index, value) in sequence.into_iter().enumerate() {
+                let content = format!("{index}-{value}");
+                std::fs::write(&source, &content).unwrap();
+                let result = write_rolling_backup(&root, &source, depth).unwrap();
+
+                if depth == 0 {
+                    prop_assert_eq!(result, None);
+                    let current = backup_files(&root, &source)
+                        .into_iter()
+                        .map(|path| (path.clone(), std::fs::read_to_string(path).unwrap()))
+                        .collect::<Vec<_>>();
+                    prop_assert_eq!(current, existing.clone());
+                } else {
+                    prop_assert!(result.is_some());
+                    expected_contents.push(content);
+                }
+            }
+
+            if depth > 0 {
+                let actual_contents = backup_files(&root, &source)
+                    .into_iter()
+                    .map(|path| std::fs::read_to_string(path).unwrap())
+                    .collect::<Vec<_>>();
+                let keep_from = expected_contents.len().saturating_sub(depth);
+                let expected_contents = expected_contents
+                    .into_iter()
+                    .skip(keep_from)
+                    .collect::<Vec<_>>();
+                prop_assert_eq!(actual_contents, expected_contents);
+            }
+
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 
@@ -351,6 +410,7 @@ fn untitled_key() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn scratch_dir(tag: &str) -> PathBuf {
         let id = UNTITLED_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -488,6 +548,51 @@ mod tests {
         assert!(!stale_path.exists(), "stale journal should be discarded");
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // Feature: pro-writer-10-star, Property 22: Recovery offers a journal only when it is newer than the manuscript
+    // Validates: Requirements 11.1
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn recovery_offers_only_newer_journals_and_cleans_up_stale_records(
+            manuscript in "[a-z]{1,32}",
+            recovered in "[a-z]{1,32}",
+            stale in "[a-z]{1,32}",
+            saved_after in "[a-z]{1,32}",
+        ) {
+            let dir = scratch_dir("property-22");
+            let root = dir.join("recovery");
+            let source = dir.join("chapter.md");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(&source, &manuscript).unwrap();
+
+            // A journal written after the manuscript is offered and retained.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            let mut fresh = Journal::in_root(&root, Some(&source), "unused");
+            fresh
+                .write_if_changed(&Rope::from_str(&recovered), Instant::now())
+                .unwrap();
+            let fresh_recovery = fresh.recoverable_text().unwrap();
+            prop_assert_eq!(fresh_recovery.as_deref(), Some(recovered.as_str()));
+            prop_assert!(fresh.path().unwrap().exists());
+
+            // A manuscript saved after its journal makes that journal stale;
+            // recovery rejects it and removes it so it cannot prompt again.
+            fresh.clear().unwrap();
+            fresh
+                .write_if_changed(&Rope::from_str(&stale), Instant::now())
+                .unwrap();
+            let stale_path = fresh.path().unwrap().to_path_buf();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::fs::write(&source, &saved_after).unwrap();
+
+            prop_assert_eq!(fresh.recoverable_text().unwrap(), None);
+            prop_assert!(!stale_path.exists(), "stale journal should be discarded");
+
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

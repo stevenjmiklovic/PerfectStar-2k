@@ -142,6 +142,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if matches!(app.mode, Mode::Annotations { .. }) {
         draw_annotations(frame, app, text_area);
     }
+    if matches!(app.mode, Mode::Lookup { .. }) {
+        draw_lookup(frame, app, text_area);
+    }
     if matches!(app.mode, Mode::ExportMenu { .. }) {
         draw_export_menu(frame, app, text_area);
     }
@@ -642,6 +645,13 @@ fn status_left(app: &App) -> String {
                 entries.len()
             ),
         },
+        Mode::Lookup { synonyms, .. } => {
+            if synonyms.is_empty() {
+                String::from(" Esc close")
+            } else {
+                String::from(" ↑↓ select · Enter replace word · Esc close")
+            }
+        }
         // The R7.8 "unavailable format" notice (a status_msg) wins over the
         // nav hint so the writer sees why a format is missing from the list.
         Mode::ExportMenu { .. } => match &app.status_msg {
@@ -650,10 +660,13 @@ fn status_left(app: &App) -> String {
         },
         // The goal-reached banner (R2.4) wins over any transient message while
         // it is fresh: it is time-bounded, must not be dismissed, and must
-        // survive the keystroke that reached the goal.
+        // survive the keystroke that reached the goal. A first-use hint (R12.3)
+        // sits just below it and above the sprint banner: it is the onboarding
+        // nudge for a capability's first invocation and should be seen once.
         Mode::Normal => match app
             .goal_banner()
             .or(app.status_msg.as_deref())
+            .or_else(|| app.first_use_hint())
             .or_else(|| app.sprint_banner())
         {
             Some(msg) => format!(" {msg}"),
@@ -1208,6 +1221,74 @@ fn draw_annotations(frame: &mut Frame, app: &App, text_area: Rect) {
     );
 }
 
+/// Thesaurus / definition overlay for the word under the cursor (^QL / ^QU,
+/// R10.1–R10.3). The definition heads the panel; synonyms follow as a navigable
+/// list — Enter on one replaces the word as a single undoable edit. Dismissed
+/// with Esc.
+fn draw_lookup(frame: &mut Frame, app: &App, text_area: Rect) {
+    let Mode::Lookup {
+        word,
+        synonyms,
+        definition,
+        selected,
+    } = &app.mode
+    else {
+        return;
+    };
+
+    let width = (text_area.width.saturating_sub(6)).clamp(30, 72);
+    let max_list = (text_area.height as usize).saturating_sub(6).clamp(3, 12);
+    // Rows: optional definition (wrapped, budget 3) + a header + synonyms.
+    let def_rows = if definition.is_empty() { 0 } else { 2 };
+    let list_rows = synonyms.len().clamp(1, max_list);
+    let height = (def_rows + list_rows + 2) as u16;
+    let area = Rect {
+        x: text_area.x + (text_area.width.saturating_sub(width)) / 2,
+        y: text_area.y + 1,
+        width,
+        height: height.min(text_area.height),
+    };
+
+    let inner = area.width.saturating_sub(2) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    if !definition.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", clip(definition.clone(), inner.saturating_sub(1))),
+            app.theme.dim,
+        )));
+        lines.push(Line::from(""));
+    }
+    let visible = (area.height as usize).saturating_sub(2 + def_rows).max(1);
+    let first = selected.saturating_sub(visible.saturating_sub(1));
+    if synonyms.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " no synonyms recorded",
+            app.theme.dim,
+        )));
+    } else {
+        for (i, syn) in synonyms.iter().enumerate().skip(first).take(visible) {
+            let row = format!(" {syn}");
+            if i == *selected {
+                lines.push(Line::from(Span::styled(row, app.theme.block)));
+            } else {
+                lines.push(Line::from(row));
+            }
+        }
+    }
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).style(app.theme.status).block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(format!(" {word} "))
+                .style(app.theme.status),
+        ),
+        area,
+    );
+}
+
 /// The unified export format picker (^KF, R7.2): the available targets, one per
 /// row. Selecting one drops into the output-path prompt. Formats whose
 /// dependency is unbundled are already omitted by the caller (R7.8).
@@ -1302,6 +1383,10 @@ fn draw_stats_overlay(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(format!(
             "   {} sentences · {:.1}% -ly adverbs",
             report.readability.sentences, report.readability.adverb_percent
+        )));
+        lines.push(Line::from(format!(
+            "   long sentences: {:.1}%",
+            report.readability.long_sentence_percent
         )));
         if !report.overused.is_empty() {
             lines.push(Line::from(""));
@@ -1532,10 +1617,12 @@ fn draw_diff(frame: &mut Frame, app: &App, text_area: Rect) {
 mod tests {
     use super::*;
     use crate::diff::DiffLine;
+    use crate::keymap::Prefix;
     use crate::snapshot::SnapshotEntry;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
+    use std::time::Duration;
 
     /// Render one frame and return the screen as text lines. Exercises the real
     /// draw path, so a width/unicode mistake in an overlay fails here instead of
@@ -1930,6 +2017,7 @@ mod tests {
         let screen = screen(&mut app).join("\n");
         assert!(screen.contains("Readability (document)"), "{screen}");
         assert!(screen.contains("words/sentence"), "{screen}");
+        assert!(screen.contains("long"), "{screen}");
         assert!(screen.contains("Most repeated"), "{screen}");
         assert!(screen.contains("knife: 2"), "{screen}");
     }
@@ -1943,5 +2031,76 @@ mod tests {
         assert!(prompt.contains("Recover unsaved changes"));
         assert!(prompt.contains("y/N"));
         assert!(prompt.contains("Esc decline"));
+    }
+
+    /// Hold a prefix key long enough that the delayed menu is due, regardless
+    /// of the configured menu delay.
+    fn hold_prefix(app: &mut App, prefix: Prefix) {
+        app.menu_delay = Duration::ZERO;
+        app.prefix = Some((prefix, Instant::now()));
+    }
+
+    #[test]
+    fn help_level_0_hides_prefix_menu_and_hint_bar() {
+        // R12.2: level 0 leaves only text + status bar. Even with a prefix held
+        // past its delay, no menu appears; and there is no hint bar row.
+        let mut app = app_with("prose\n");
+        app.help_level = 0;
+        hold_prefix(&mut app, Prefix::P);
+
+        let screen = screen(&mut app).join("\n");
+        assert!(
+            !screen.contains("^P Project"),
+            "prefix menu leaked at level 0: {screen}"
+        );
+        assert!(
+            !screen.contains("^KD save · ^KQ quit"),
+            "hint bar leaked at level 0: {screen}"
+        );
+    }
+
+    #[test]
+    fn help_level_1_shows_delayed_prefix_menu_including_p() {
+        // R12.2: level 1 shows delayed prefix menus, including the new ^P group.
+        let mut app = app_with("prose\n");
+        app.help_level = 1;
+        hold_prefix(&mut app, Prefix::P);
+
+        let screen = screen(&mut app).join("\n");
+        assert!(screen.contains("^P Project"), "{screen}");
+        // A ^P command is listed by name in the menu.
+        assert!(screen.contains("toggle binder"), "{screen}");
+        // Level 1 does not add the hint bar.
+        assert!(
+            !screen.contains("^KD save · ^KQ quit"),
+            "hint bar should not show at level 1: {screen}"
+        );
+    }
+
+    #[test]
+    fn help_level_2_adds_the_hint_bar() {
+        // R12.2: level 2 additionally shows the hint bar.
+        let mut app = app_with("prose\n");
+        app.help_level = 2;
+
+        let screen = screen(&mut app).join("\n");
+        assert!(
+            screen.contains("^KD save · ^KQ quit"),
+            "hint bar missing at level 2: {screen}"
+        );
+    }
+
+    #[test]
+    fn a_first_use_hint_shows_in_the_status_area_but_not_at_level_0() {
+        // R12.3: the hint is a one-line status-area message; R12.4: suppressed
+        // entirely at level 0. This test drives the render path directly by
+        // setting the banner the app would set on first use.
+        let mut app = app_with("prose\n");
+
+        // The banner shows in the status row when help is on.
+        app.help_level = 1;
+        app.set_first_use_hint_for_test("Snapshot saved — ^KO lists revisions and diffs them");
+        let status = screen(&mut app).last().unwrap().clone();
+        assert!(status.contains("lists revisions"), "{status:?}");
     }
 }

@@ -196,7 +196,11 @@ fn build_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static PROPERTY_SEARCH_ID: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn search_finds_matches_across_files() {
@@ -309,5 +313,137 @@ mod tests {
         )];
         let results = search_project(&docs, "anything", false, None, None);
         assert!(results.is_empty());
+    }
+
+    fn query_strategy() -> impl Strategy<Value = String> {
+        prop::collection::vec(prop::sample::select(vec!['a', 'b', 'c', 'd']), 1..=5)
+            .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    fn document_strategy() -> impl Strategy<Value = String> {
+        prop::collection::vec(
+            prop::sample::select(vec![
+                'a', 'b', 'c', 'd', 'A', 'B', 'C', 'D', ' ', '\n', '_', '-', '.', ',',
+            ]),
+            0..=96,
+        )
+        .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    fn uppercase_ascii(value: &str) -> String {
+        value.chars().map(|c| c.to_ascii_uppercase()).collect()
+    }
+
+    fn expected_occurrences(text: &str, query: &str, whole_word: bool) -> Vec<(usize, usize)> {
+        let fold = !query.chars().any(|c| c.is_uppercase());
+        let haystack = if fold {
+            text.to_ascii_lowercase()
+        } else {
+            text.to_owned()
+        };
+        let needle = if fold {
+            query.to_ascii_lowercase()
+        } else {
+            query.to_owned()
+        };
+        let chars: Vec<char> = text.chars().collect();
+        let query_len = needle.chars().count();
+
+        haystack
+            .match_indices(&needle)
+            .filter_map(|(byte_pos, _)| {
+                let char_pos = haystack[..byte_pos].chars().count();
+                if whole_word {
+                    let before_ok = char_pos == 0 || !is_word_char(chars[char_pos - 1]);
+                    let end = char_pos + query_len;
+                    let after_ok = end >= chars.len() || !is_word_char(chars[end]);
+                    if !(before_ok && after_ok) {
+                        return None;
+                    }
+                }
+                let line = chars[..char_pos].iter().filter(|&&c| c == '\n').count() + 1;
+                Some((char_pos, line))
+            })
+            .collect()
+    }
+
+    // Feature: pro-writer-10-star, Property 20: Project search finds all and only the matching occurrences
+    // Validates: Requirements 6.1, 6.3, 1.7
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 128,
+            .. ProptestConfig::default()
+        })]
+
+        #[test]
+        fn project_search_finds_all_and_only_matching_occurrences(
+            query_base in query_strategy(),
+            uppercase_query in any::<bool>(),
+            whole_word in any::<bool>(),
+            random_bodies in prop::collection::vec(document_strategy(), 1..=4),
+        ) {
+            let query = if uppercase_query {
+                uppercase_ascii(&query_base)
+            } else {
+                query_base.clone()
+            };
+            let id = PROPERTY_SEARCH_ID.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "pstar-projsearch-prop-{}-{id}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+
+            let texts: Vec<String> = random_bodies
+                .into_iter()
+                .enumerate()
+                .map(|(doc_idx, body)| {
+                    let variant = if doc_idx % 2 == 0 {
+                        query_base.clone()
+                    } else {
+                        uppercase_ascii(&query_base)
+                    };
+                    format!("{body}\n{variant} {variant}x x{variant}\n")
+                })
+                .collect();
+            let docs: Vec<(usize, String, PathBuf)> = texts
+                .iter()
+                .enumerate()
+                .map(|(doc_idx, text)| {
+                    let path = dir.join(format!("doc-{doc_idx}.md"));
+                    fs::write(&path, text).unwrap();
+                    (doc_idx, format!("Document {doc_idx}"), path)
+                })
+                .chain(std::iter::once((
+                    99_999,
+                    String::from("Missing"),
+                    dir.join("missing.md"),
+                )))
+                .collect();
+
+            let active_rope = ropey::Rope::from_str(&texts[0]);
+            let results = search_project(
+                &docs,
+                &query,
+                whole_word,
+                Some(&docs[0].2),
+                Some(&active_rope),
+            );
+
+            let mut expected = Vec::new();
+            for (doc_idx, text) in texts.iter().enumerate() {
+                for (char_pos, line) in expected_occurrences(text, &query, whole_word) {
+                    expected.push((doc_idx, char_pos, line));
+                }
+            }
+            let actual: Vec<(usize, usize, usize)> = results
+                .iter()
+                .map(|result| (result.doc_idx, result.char_pos, result.line))
+                .collect();
+
+            let _ = fs::remove_dir_all(&dir);
+            prop_assert_eq!(actual, expected);
+        }
     }
 }

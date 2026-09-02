@@ -148,6 +148,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn root_is_named_perfectstar2k() {
@@ -204,10 +206,67 @@ mod tests {
         assert!(key.starts_with('-'));
     }
 
+    // Feature: pro-writer-10-star, Property 2: path_key is deterministic and collision-resistant across spellings
+    // Validates: Requirements 1.1, 4.1, 5.1, 9.8
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn path_key_is_deterministic_and_collision_resistant(
+            suffix in prop::collection::vec(0u8..=25, 1..20),
+        ) {
+            let root = property_path_key_scratch();
+            let left_dir = root.join("left");
+            let right_dir = root.join("right");
+            std::fs::create_dir_all(&left_dir).unwrap();
+            std::fs::create_dir_all(&right_dir).unwrap();
+
+            let suffix: String = suffix
+                .into_iter()
+                .map(|byte| char::from(b'a' + byte))
+                .collect();
+            let file_name = format!("chapter-{suffix}.md");
+            let left = left_dir.join(&file_name);
+            let right = right_dir.join(&file_name);
+            std::fs::write(&left, b"left").unwrap();
+            std::fs::write(&right, b"right").unwrap();
+
+            let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+            let canonical_left = left.canonicalize().unwrap();
+            let relative_left = canonical_left.strip_prefix(&cwd).unwrap();
+
+            prop_assert_eq!(path_key(&left), path_key(&left));
+            prop_assert_eq!(path_key(&left), path_key(relative_left));
+            prop_assert_ne!(path_key(&left), path_key(&right));
+
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
     /// A unique scratch path under the temp dir. Uses the test's line number so
     /// concurrent tests don't collide, without needing a random source.
     fn scratch(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("pstar-paths-test-{tag}"))
+    }
+
+    static PROPERTY_SCRATCH_ID: AtomicU64 = AtomicU64::new(0);
+    static PROPERTY_PATH_KEY_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn property_scratch() -> PathBuf {
+        let id = PROPERTY_SCRATCH_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("pstar-paths-property1-{}-{id}", std::process::id()))
+    }
+
+    fn property_path_key_scratch() -> PathBuf {
+        let id = PROPERTY_PATH_KEY_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::current_dir()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .join(format!(
+                ".pstar-paths-property2-{}-{id}",
+                std::process::id()
+            ))
     }
 
     #[test]
@@ -255,6 +314,36 @@ mod tests {
         tmp.push(".tmp~");
         assert!(!Path::new(&tmp).exists(), "temp file was left behind");
         let _ = std::fs::remove_file(&p);
+    }
+
+    // Feature: pro-writer-10-star, Property 1: Atomic write never truncates the prior good file
+    // Validates: Requirements 11.5, 1.4, 4.6, 5.6, 7.9
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn failed_atomic_producer_preserves_prior_file_and_removes_temp(
+            prior in prop::collection::vec(any::<u8>(), 0..256),
+            partial in prop::collection::vec(any::<u8>(), 1..256),
+        ) {
+            let path = property_scratch();
+            let mut tmp = path.clone().into_os_string();
+            tmp.push(".tmp~");
+            let tmp = PathBuf::from(tmp);
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(&tmp);
+            std::fs::write(&path, &prior).unwrap();
+
+            let result = write_atomic_with(&path, |file| {
+                file.write_all(&partial)?;
+                Err(io::Error::other("simulated producer failure"))
+            });
+
+            prop_assert!(result.is_err());
+            prop_assert_eq!(std::fs::read(&path).unwrap(), prior);
+            prop_assert!(!tmp.exists(), "temp file was left behind");
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     #[test]

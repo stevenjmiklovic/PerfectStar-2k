@@ -84,7 +84,7 @@ impl Default for Config {
             style_adverbs: true,
             style_filler: true,
             style_long_sentences: true,
-            style_sentence_words: 30,
+            style_sentence_words: 40,
             manuscript_font: String::from("times"),
             autocorrect: true,
             smart_typography: true,
@@ -178,7 +178,7 @@ mod tests {
         assert!(!config.style, "style advice is opt-in");
         let checks = config.style_checks();
         assert!(checks.passive && checks.adverbs && checks.filler && checks.long_sentences);
-        assert_eq!(checks.sentence_words, 30);
+        assert_eq!(checks.sentence_words, 40);
     }
 
     #[test]
@@ -199,7 +199,7 @@ mod tests {
         // Zero would flag every sentence in the document, which is nobody's
         // intent when they type it.
         let config: Config = toml::from_str("style_sentence_words = 0\n").unwrap();
-        assert_eq!(config.style_checks().sentence_words, 30);
+        assert_eq!(config.style_checks().sentence_words, 40);
     }
 
     #[test]

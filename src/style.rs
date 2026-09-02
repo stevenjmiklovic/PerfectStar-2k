@@ -269,7 +269,7 @@ impl Default for StyleChecks {
             adverbs: true,
             filler: true,
             long_sentences: true,
-            sentence_words: 30,
+            sentence_words: 40,
         }
     }
 }
@@ -424,12 +424,24 @@ pub struct Readability {
     pub avg_sentence_words: f32,
     /// Share of words that are `-ly` adverbs, as a percentage.
     pub adverb_percent: f32,
+    /// Share of sentences longer than the configured threshold, as a percentage.
+    pub long_sentence_percent: f32,
 }
 
-/// Compute readability over prose (notes and Markdown markers excluded).
+/// Compute readability over prose (notes and Markdown markers excluded), using
+/// the default long-sentence threshold from [`StyleChecks`].
 pub fn readability(text: &str) -> Readability {
+    readability_with_threshold(text, StyleChecks::default().sentence_words)
+}
+
+/// Compute readability using an explicit long-sentence threshold.
+///
+/// The app passes its configured threshold here so the overlay's percentage
+/// agrees with the style markers shown in the document.
+pub fn readability_with_threshold(text: &str, sentence_words: usize) -> Readability {
     let mut words = 0usize;
     let mut sentences = 0usize;
+    let mut long_sentences = 0usize;
     let mut syllables = 0usize;
     let mut adverbs = 0usize;
 
@@ -441,14 +453,25 @@ pub fn readability(text: &str) -> Readability {
         if stripped.trim().is_empty() {
             continue;
         }
-        sentences += sentence_spans(&stripped).len();
+        let sentence_ranges = sentence_spans(&stripped);
+        sentences += sentence_ranges.len();
         let chars: Vec<char> = stripped.chars().collect();
-        for (s, e) in word_spans(&stripped) {
-            let word = lowercase_of(&chars[s..e]);
+        let spans = word_spans(&stripped);
+        for (s, e) in &spans {
+            let word = lowercase_of(&chars[*s..*e]);
             words += 1;
             syllables += syllables_in(&word);
             if is_ly_adverb(&word) {
                 adverbs += 1;
+            }
+        }
+        for (start, end) in sentence_ranges {
+            let sentence_word_count = spans
+                .iter()
+                .filter(|&&(word_start, word_end)| word_start >= start && word_end <= end)
+                .count();
+            if sentence_word_count > sentence_words {
+                long_sentences += 1;
             }
         }
     }
@@ -474,6 +497,11 @@ pub fn readability(text: &str) -> Readability {
             0.0
         } else {
             ((adverbs as f32 / words as f32 * 1000.0).round()) / 10.0
+        },
+        long_sentence_percent: if effective_sentences == 0 {
+            0.0
+        } else {
+            ((long_sentences as f32 / effective_sentences as f32 * 1000.0).round()) / 10.0
         },
     }
 }
@@ -686,6 +714,16 @@ mod tests {
         assert_eq!(sentence.start, 0);
         assert_eq!(sentence.end, long.chars().count());
 
+        // The requirement's default is 40 words: exactly 40 is allowed, while
+        // the 41-word sentence above is flagged.
+        let at_default = format!("{} end.", "word ".repeat(39));
+        assert!(
+            !engine()
+                .issues_in_line(&at_default)
+                .iter()
+                .any(|i| i.kind == StyleKind::LongSentence)
+        );
+
         // Just under the threshold is left alone.
         let ok = format!("{} end.", "word ".repeat(28));
         assert!(
@@ -790,6 +828,12 @@ mod tests {
 
         let adverbs = readability("He quietly, slowly, sadly left.\n");
         assert!(adverbs.adverb_percent > 50.0, "{}", adverbs.adverb_percent);
+
+        let long = readability_with_threshold(
+            "One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty one. Short sentence.\n",
+            20,
+        );
+        assert_eq!(long.long_sentence_percent, 50.0);
 
         // Empty and note-only input is handled without dividing by zero.
         let empty = readability("");

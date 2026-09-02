@@ -1,13 +1,13 @@
 [package]
 name = "perfectstar2k"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "A modern TUI homage to WordStar & WordPerfect for DOS — a real writing tool built on WordStar's touch-typist command language and long-hand-page metaphor."
 license = "GPL-3.0-only"
 readme = "README.md"
 keywords = ["editor", "tui", "wordstar", "wordperfect", "writing"]
 categories = ["command-line-utilities", "text-editors"]
-exclude = [".gitignore"]
+exclude = [".gitignore", "planning/"]
 
 [[bin]]
 name = "pstar"
@@ -26,3 +26,6 @@ spellbook = "0.4.2"
 toml = "1.1.2"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
+
+[dev-dependencies]
+proptest = "=1.11.0"

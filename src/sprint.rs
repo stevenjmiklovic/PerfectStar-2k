@@ -108,11 +108,8 @@ impl Sprint {
     /// The result as of `now`.
     pub fn report(&self, now: Instant, current_words: usize) -> Report {
         let words = self.words_written(current_words);
-        let met_target = match self.word_target {
-            Some(target) => words >= target as i64,
-            // A timed sprint's terms are its clock.
-            None => self.remaining(now).is_some_and(|left| left.is_zero()),
-        };
+        // A sprint ends as soon as either configured target is reached.
+        let met_target = self.is_finished(now, current_words);
         Report {
             words,
             elapsed: now.saturating_duration_since(self.started),
@@ -184,6 +181,60 @@ impl Focus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    fn sprint_spec() -> impl Strategy<Value = String> {
+        prop_oneof![
+            (1_u64..=180, 1_usize..=100_000)
+                .prop_map(|(minutes, words)| format!("{minutes}/{words}")),
+            (1_u64..=180).prop_map(|minutes| minutes.to_string()),
+            (1_usize..=100_000).prop_map(|words| format!("/{words}")),
+        ]
+    }
+
+    fn sprint_case() -> impl Strategy<Value = (String, usize, i64)> {
+        (sprint_spec(), 0_usize..=1_000_000).prop_flat_map(|(spec, start_words)| {
+            let minimum_delta = -(start_words as i64);
+            (Just(spec), Just(start_words), minimum_delta..=100_000_i64)
+        })
+    }
+
+    // Feature: pro-writer-10-star, Property 9
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 100,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn sprint_ends_at_first_target_and_reports_net_words(
+            (spec, start_words, word_delta) in sprint_case(),
+            elapsed_secs in 0_u64..=10_800,
+        ) {
+            let now = Instant::now();
+            let sprint = Sprint::parse(&spec, start_words, now).unwrap();
+            let current_words = (start_words as i64 + word_delta) as usize;
+
+            let report = sprint.report(at(now, elapsed_secs), current_words);
+            prop_assert_eq!(report.words, word_delta);
+            prop_assert_eq!(report.elapsed, Duration::from_secs(elapsed_secs));
+            prop_assert_eq!(report.met_target, sprint.is_finished(at(now, elapsed_secs), current_words));
+
+            if let Some(target) = sprint.word_target {
+                let before_target = start_words + target - 1;
+                let before_time = sprint
+                    .duration
+                    .map_or(now, |duration| at(now, duration.as_secs() - 1));
+                prop_assert!(!sprint.is_finished(before_time, before_target));
+                prop_assert!(sprint.is_finished(before_time, start_words + target));
+            }
+
+            if let Some(duration) = sprint.duration {
+                prop_assert!(!sprint.is_finished(at(now, duration.as_secs() - 1), start_words));
+                prop_assert!(sprint.is_finished(at(now, duration.as_secs()), start_words));
+            }
+        }
+    }
 
     fn at(now: Instant, secs: u64) -> Instant {
         now + Duration::from_secs(secs)
