@@ -64,12 +64,14 @@ fn nav_xhtml(doc: &CompiledDoc) -> String {
     out.push_str("<nav epub:type=\"toc\" id=\"toc\"><h1>Contents</h1><ol>\n");
     let mut heading = 0usize;
     for block in &doc.blocks {
-        if let Block::Heading { runs, .. } = block {
+        if let Block::Heading { level, runs } = block {
             heading += 1;
-            out.push_str(&format!(
-                "<li><a href=\"content.xhtml#heading-{heading}\">{}</a></li>\n",
-                escape_xml(&runs_text(runs))
-            ));
+            if *level <= 2 {
+                out.push_str(&format!(
+                    "<li><a href=\"content.xhtml#heading-{heading}\">{}</a></li>\n",
+                    escape_xml(&runs_text(runs))
+                ));
+            }
         }
     }
     out.push_str("</ol></nav>\n</body></html>\n");
@@ -131,5 +133,16 @@ mod tests {
             epub.windows(b"application/epub+zip".len())
                 .any(|w| w == b"application/epub+zip")
         );
+    }
+
+    #[test]
+    fn navigation_contains_only_heading_levels_one_and_two() {
+        let nav = nav_xhtml(&CompiledDoc::from_text(
+            "# One\n### Subsection\n## Two\n#### Detail\n",
+        ));
+        assert!(nav.contains(">One</a>"));
+        assert!(nav.contains("content.xhtml#heading-3\">Two</a>"));
+        assert!(!nav.contains("Subsection"));
+        assert!(!nav.contains("Detail"));
     }
 }

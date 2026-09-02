@@ -423,6 +423,18 @@ mod tests {
         )
     }
 
+    fn compile_document_spec() -> impl Strategy<Value = (String, String, bool, bool, bool, DocRole)>
+    {
+        (
+            "[A-Za-z][A-Za-z0-9 ]{0,24}",
+            "[A-Za-z][A-Za-z0-9 _-]{0,20}",
+            any::<bool>(),
+            any::<bool>(),
+            any::<bool>(),
+            prop_oneof![Just(DocRole::Manuscript), Just(DocRole::Note)],
+        )
+    }
+
     static PROPERTY_SCRATCH_ID: AtomicUsize = AtomicUsize::new(0);
 
     // Feature: pro-writer-10-star, Property 3: Manifest round-trip preserves project structure
@@ -498,6 +510,131 @@ mod tests {
                 prop_assert_eq!(loaded_doc.include_in_compile, original_doc.include_in_compile);
                 prop_assert_eq!(loaded_doc.role, original_doc.role);
             }
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    // Feature: pro-writer-10-star, Property 4: Compile excludes notes and non-included docs and tolerates missing files
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 128,
+            .. ProptestConfig::default()
+        })]
+        #[test]
+        fn compile_selects_readable_manuscripts_and_reports_unreadable_docs(
+            random_docs in prop::collection::vec(compile_document_spec(), 0..8),
+            separator in prop_oneof![
+                Just(Separator::PageBreak),
+                Just(Separator::BlankLines),
+                Just(Separator::HorizontalRule),
+                Just(Separator::None),
+            ],
+        ) {
+            let id = PROPERTY_SCRATCH_ID.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "pstar-project-compile-property-{}-{id}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+
+            // Keep all required selection/resilience categories present in
+            // every generated project; random entries broaden the cases.
+            let mut specs = vec![
+                (
+                    String::from("Included manuscript content."),
+                    String::from("Included"),
+                    true,
+                    true,
+                    false,
+                    DocRole::Manuscript,
+                ),
+                (
+                    String::from("Research note content."),
+                    String::from("Research notes"),
+                    true,
+                    true,
+                    false,
+                    DocRole::Note,
+                ),
+                (
+                    String::from("Excluded manuscript content."),
+                    String::from("Excluded"),
+                    false,
+                    true,
+                    false,
+                    DocRole::Manuscript,
+                ),
+                (
+                    String::from("Missing manuscript content."),
+                    String::from("Missing"),
+                    true,
+                    false,
+                    false,
+                    DocRole::Manuscript,
+                ),
+                (
+                    String::from("Unreadable manuscript content."),
+                    String::from("Unreadable"),
+                    true,
+                    true,
+                    true,
+                    DocRole::Manuscript,
+                ),
+            ];
+            specs.extend(random_docs);
+
+            let mut expected_parts = Vec::new();
+            let mut expected_skipped = Vec::new();
+            let mut docs = Vec::with_capacity(specs.len());
+
+            for (index, (content, title, include_in_compile, exists, directory, role)) in
+                specs.into_iter().enumerate()
+            {
+                let path = dir.join(format!("doc-{index}.md"));
+                if exists {
+                    if directory {
+                        std::fs::create_dir_all(&path).unwrap();
+                    } else {
+                        std::fs::write(&path, &content).unwrap();
+                    }
+                }
+
+                if include_in_compile && role != DocRole::Note {
+                    if exists && !directory {
+                        expected_parts.push(content);
+                    } else {
+                        expected_skipped.push((index, title.clone()));
+                    }
+                }
+
+                docs.push(DocEntry {
+                    path,
+                    title,
+                    include_in_compile,
+                    role,
+                });
+            }
+
+            let project = Project {
+                manifest_path: dir.join("book.pstarproj"),
+                manifest: ProjectManifest {
+                    name: String::from("Property 4 project"),
+                    docs,
+                    separator,
+                },
+            };
+
+            let result = project.compile();
+            prop_assert_eq!(result.text, expected_parts.join(separator.as_str()));
+            let actual_skipped: Vec<(usize, String)> = result
+                .skipped
+                .iter()
+                .map(|doc| (doc.index, doc.title.clone()))
+                .collect();
+            prop_assert_eq!(actual_skipped, expected_skipped);
+            prop_assert!(result.skipped.iter().all(|doc| !doc.reason.is_empty()));
 
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -706,6 +843,7 @@ mod tests {
 
     #[test]
     fn separator_as_str() {
+        assert_eq!(Separator::default(), Separator::PageBreak);
         assert_eq!(Separator::PageBreak.as_str(), "\n\x0c\n");
         assert_eq!(Separator::BlankLines.as_str(), "\n\n\n\n");
         assert_eq!(Separator::HorizontalRule.as_str(), "\n# # #\n\n");
@@ -911,7 +1049,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let manifest_path = dir.join("bad.pstarproj");
-        std::fs::write(&manifest_path, "not valid TOML {[}").unwrap();
+        let malformed = "not valid TOML {[}";
+        std::fs::write(&manifest_path, malformed).unwrap();
+        let before = std::fs::read(&manifest_path).unwrap();
 
         let result = Project::load(&manifest_path);
         assert!(result.is_err());
@@ -920,6 +1060,11 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("Invalid project manifest")
+        );
+        assert_eq!(
+            std::fs::read(&manifest_path).unwrap(),
+            before,
+            "loading a malformed manifest must not overwrite it"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -1384,6 +1384,10 @@ fn draw_stats_overlay(frame: &mut Frame, app: &App, area: Rect) {
             "   {} sentences · {:.1}% -ly adverbs",
             report.readability.sentences, report.readability.adverb_percent
         )));
+        lines.push(Line::from(format!(
+            "   long sentences: {:.1}%",
+            report.readability.long_sentence_percent
+        )));
         if !report.overused.is_empty() {
             lines.push(Line::from(""));
             lines.push(Line::from(" Most repeated:"));
@@ -2013,6 +2017,7 @@ mod tests {
         let screen = screen(&mut app).join("\n");
         assert!(screen.contains("Readability (document)"), "{screen}");
         assert!(screen.contains("words/sentence"), "{screen}");
+        assert!(screen.contains("long"), "{screen}");
         assert!(screen.contains("Most repeated"), "{screen}");
         assert!(screen.contains("knife: 2"), "{screen}");
     }

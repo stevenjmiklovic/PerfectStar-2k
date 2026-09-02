@@ -371,6 +371,121 @@ mod tests {
         }
     }
 
+    // Feature: pro-writer-10-star, Property 15: Annotation anchors adjust to stay attached across edits
+    // Validates: Requirements 9.5
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn annotation_adjust_matches_block_position_adjustment(
+            document_len in 0usize..=512,
+            raw_anchor in any::<usize>(),
+            raw_span_len in any::<usize>(),
+            edits in prop::collection::vec(
+                (any::<usize>(), 0usize..=512, 0usize..=64),
+                1..=32,
+            ),
+        ) {
+            let anchor = raw_anchor % (document_len + 1);
+            let span_len = raw_span_len % (document_len - anchor + 1);
+            let mut annotation = note(anchor, span_len);
+            let mut expected_anchor = anchor;
+            let mut expected_len = span_len;
+            let mut expected_orphaned = false;
+            let mut current_document_len = document_len;
+
+            for (raw_at, raw_delete_len, insert_len) in edits {
+                let at = raw_at % (current_document_len + 1);
+                let delete_len = raw_delete_len.min(current_document_len - at);
+
+                if !expected_orphaned {
+                    let expected_start =
+                        crate::block::adjust_pos(expected_anchor, at, delete_len, insert_len);
+                    let expected_end = crate::block::adjust_pos(
+                        expected_anchor + expected_len,
+                        at,
+                        delete_len,
+                        insert_len,
+                    );
+                    expected_orphaned = expected_len > 0 && expected_end <= expected_start;
+                    expected_anchor = expected_start;
+                    expected_len = if expected_orphaned {
+                        0
+                    } else {
+                        expected_end - expected_start
+                    };
+                }
+
+                annotation.adjust(at, delete_len, insert_len);
+
+                prop_assert_eq!(
+                    (annotation.anchor, annotation.len, annotation.orphaned),
+                    (expected_anchor, expected_len, expected_orphaned),
+                    "annotation diverged after edit at={}, del={}, ins={}",
+                    at,
+                    delete_len,
+                    insert_len,
+                );
+                prop_assert_eq!(&annotation.text, "check this");
+
+                current_document_len = current_document_len - delete_len + insert_len;
+            }
+        }
+    }
+
+    // Feature: pro-writer-10-star, Property 16: Deleting the anchored text orphans the annotation rather than losing it
+    // Validates: Requirements 9.6
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn deleting_a_generated_annotation_span_orphans_without_losing_text(
+            source_chars in prop::collection::vec(any::<char>(), 1..=512),
+            raw_anchor in any::<usize>(),
+            raw_span_len in any::<usize>(),
+            raw_delete_start in any::<usize>(),
+            raw_delete_suffix in any::<usize>(),
+        ) {
+            let document_len = source_chars.len();
+            let anchor = raw_anchor % document_len;
+            let span_len = 1 + raw_span_len % (document_len - anchor);
+            let span_end = anchor + span_len;
+            let delete_start = raw_delete_start % (anchor + 1);
+            let delete_end =
+                span_end + raw_delete_suffix % (document_len - span_end + 1);
+            let delete_len = delete_end - delete_start;
+
+            let expected_text: String = source_chars[..delete_start]
+                .iter()
+                .copied()
+                .chain(source_chars[delete_end..].iter().copied())
+                .collect();
+            let mut remaining_chars = source_chars.clone();
+            remaining_chars.drain(delete_start..delete_end);
+            let actual_text: String = remaining_chars.into_iter().collect();
+            prop_assert_eq!(actual_text, expected_text);
+
+            let mut annotations = vec![Annotation::new(
+                anchor,
+                span_len,
+                String::from("check this"),
+            )];
+            annotations[0].adjust(delete_start, delete_len, 0);
+
+            prop_assert_eq!(annotations.len(), 1, "the annotation must not be dropped");
+            let orphan = &annotations[0];
+            prop_assert!(orphan.orphaned);
+            prop_assert_eq!(orphan.anchor, delete_start);
+            prop_assert_eq!(orphan.len, 0);
+            prop_assert_eq!(&orphan.text, "check this");
+            prop_assert!(!orphan.covers(orphan.anchor));
+
+            let before_unrelated_edit = orphan.clone();
+            annotations[0].adjust(0, 0, 1);
+            prop_assert_eq!(&annotations[0], &before_unrelated_edit);
+        }
+    }
+
     #[test]
     fn saving_leaves_no_temp_file_behind() {
         let dir = scratch_dir("atomic");

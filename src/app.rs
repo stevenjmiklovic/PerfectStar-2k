@@ -1096,7 +1096,17 @@ impl App {
                         },
                         Edit {
                             at,
-                            deleted: String::new(),
+                            // Quotes are substituted before the straight
+                            // character enters the buffer. Record that
+                            // logical source character so undo restores what
+                            // the writer typed; dash/ellipsis substitutions
+                            // already consume characters present in the
+                            // buffer and therefore keep this empty.
+                            deleted: if consumed_before == 0 {
+                                c.to_string()
+                            } else {
+                                String::new()
+                            },
                             inserted: glyph.to_string(),
                         },
                     ],
@@ -2802,11 +2812,26 @@ impl App {
         format: &str,
         _skipped: usize,
     ) {
-        match exporter.export(doc, Path::new(path)) {
+        let output = match Self::absolute_output_path(Path::new(path)) {
+            Ok(output) => output,
+            Err(err) => {
+                self.status_msg = Some(format!("{format} export failed: {err}"));
+                return;
+            }
+        };
+        match exporter.export(doc, &output) {
             Ok(()) => {
-                self.status_msg = Some(format!("{format} exported to {path}"));
+                self.status_msg = Some(format!("{format} exported to {}", output.display()));
             }
             Err(err) => self.status_msg = Some(format!("{format} export failed: {err}")),
+        }
+    }
+
+    fn absolute_output_path(path: &Path) -> std::io::Result<PathBuf> {
+        if path.is_absolute() {
+            Ok(path.to_path_buf())
+        } else {
+            Ok(std::env::current_dir()?.join(path))
         }
     }
 
@@ -3993,9 +4018,16 @@ impl App {
             Some((begin, end)) => self.buf.rope.slice(begin..end).to_string(),
             None => self.buf.rope.to_string(),
         };
+        let readability = if self.style.checks.sentence_words
+            == crate::style::StyleChecks::default().sentence_words
+        {
+            crate::style::readability(&text)
+        } else {
+            crate::style::readability_with_threshold(&text, self.style.checks.sentence_words)
+        };
         StyleReport {
             selection: self.blocks.range().is_some(),
-            readability: crate::style::readability(&text),
+            readability,
             overused: crate::style::word_frequency(&text, 5),
         }
     }

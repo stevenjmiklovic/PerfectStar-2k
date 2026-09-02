@@ -797,6 +797,7 @@ pub fn menu_entries(prefix: Prefix) -> Vec<(char, &'static str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn project_prefix_has_a_label() {
@@ -953,6 +954,62 @@ mod tests {
         let q_menu = menu_entries(Prefix::Q);
         assert!(q_menu.iter().any(|(k, _)| *k == 'l'));
         assert!(q_menu.iter().any(|(k, _)| *k == 'u'));
+    }
+
+    // Feature: pro-writer-10-star, Property 23: Every command is reachable by name in the palette
+    // Validates: Requirements 12.1, 12.5
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn palette_reachability_and_deduplication_property(
+            uppercase_query in any::<bool>(),
+        ) {
+            let entries = palette_entries();
+            let mut unique_commands = Vec::new();
+            for binding in BINDINGS {
+                if !unique_commands.contains(&binding.cmd) {
+                    unique_commands.push(binding.cmd);
+                }
+            }
+
+            prop_assert_eq!(
+                entries.len(),
+                unique_commands.len(),
+                "palette entries must contain exactly one entry per bound command",
+            );
+
+            let mut seen_commands = Vec::new();
+            for (command, _, _) in &entries {
+                prop_assert!(
+                    !seen_commands.contains(command),
+                    "palette contains duplicate entry for {command:?}",
+                );
+                seen_commands.push(*command);
+            }
+
+            for binding in BINDINGS {
+                let query = if uppercase_query {
+                    binding.name.to_ascii_uppercase()
+                } else {
+                    binding.name.to_owned()
+                };
+                prop_assert!(
+                    entries.iter().any(|(command, _, chord)| {
+                        *command == binding.cmd && chord.starts_with('^')
+                    }),
+                    "{command:?} is missing from the palette",
+                    command = binding.cmd,
+                );
+                prop_assert!(
+                    filtered_entries(&query)
+                        .iter()
+                        .any(|(command, _, _)| *command == binding.cmd),
+                    "{command:?} is not reachable by name {query:?}",
+                    command = binding.cmd,
+                );
+            }
+        }
     }
 
     #[test]

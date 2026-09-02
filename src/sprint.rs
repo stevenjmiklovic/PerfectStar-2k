@@ -108,11 +108,8 @@ impl Sprint {
     /// The result as of `now`.
     pub fn report(&self, now: Instant, current_words: usize) -> Report {
         let words = self.words_written(current_words);
-        let met_target = match self.word_target {
-            Some(target) => words >= target as i64,
-            // A timed sprint's terms are its clock.
-            None => self.remaining(now).is_some_and(|left| left.is_zero()),
-        };
+        // A sprint ends as soon as either configured target is reached.
+        let met_target = self.is_finished(now, current_words);
         Report {
             words,
             elapsed: now.saturating_duration_since(self.started),
@@ -221,11 +218,7 @@ mod tests {
             let report = sprint.report(at(now, elapsed_secs), current_words);
             prop_assert_eq!(report.words, word_delta);
             prop_assert_eq!(report.elapsed, Duration::from_secs(elapsed_secs));
-            let expected_met_target = match sprint.word_target {
-                Some(target) => word_delta >= target as i64,
-                None => elapsed_secs >= sprint.duration.unwrap().as_secs(),
-            };
-            prop_assert_eq!(report.met_target, expected_met_target);
+            prop_assert_eq!(report.met_target, sprint.is_finished(at(now, elapsed_secs), current_words));
 
             if let Some(target) = sprint.word_target {
                 let before_target = start_words + target - 1;

@@ -572,6 +572,226 @@ mod tests {
         }
     }
 
+    // Feature: pro-writer-10-star, Property 11
+    // Validates: Requirements 4.1, 4.7
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn hostile_snapshot_labels_stay_inside_the_store(
+            (marker, suffix) in (
+                prop::sample::select(vec![
+                    "..",
+                    "../",
+                    r"..\\",
+                    "/",
+                    r"\\",
+                    "../../etc/passwd",
+                    r"..\\..\\etc\\passwd",
+                    "nested/name",
+                    r"nested\\name",
+                    "a/../b",
+                ]),
+                prop::collection::vec(any::<char>(), 0..64),
+            )
+                .prop_map(|(marker, suffix)| {
+                    let suffix: String = suffix.into_iter().collect();
+                    (marker, suffix)
+                }),
+        ) {
+            let label = format!("{marker}{suffix}{marker}");
+            let dir = scratch_dir("property-11");
+            let mut store = SnapshotStore::in_dir(dir.clone());
+            let rope = Rope::from_str("safe snapshot text\n");
+
+            let entry = store.capture(&rope, Some(&label)).unwrap();
+            let snapshot_path = store.path_of(&entry);
+
+            prop_assert_eq!(snapshot_path.parent(), Some(dir.as_path()));
+            prop_assert!(snapshot_path.starts_with(&dir));
+            prop_assert!(entry.file.ends_with(".txt"));
+            prop_assert!(!entry.file.contains('/'));
+            prop_assert!(!entry.file.contains('\\'));
+            prop_assert!(snapshot_path.is_file());
+            prop_assert_eq!(store.read_text(&entry).unwrap(), rope.to_string());
+            prop_assert_eq!(snapshot_files(&dir), vec![entry.file.clone()]);
+            prop_assert!(
+                std::fs::read_dir(&dir)
+                    .unwrap()
+                    .all(|child| child
+                        .unwrap()
+                        .file_type()
+                        .map(|kind| kind.is_file())
+                        .unwrap_or(false)),
+                "snapshot store contains a nested directory"
+            );
+
+            let reopened = SnapshotStore::in_dir(dir.clone());
+            let reopened_entry = reopened
+                .entries()
+                .iter()
+                .find(|candidate| candidate.file == entry.file)
+                .expect("captured snapshot remains listed after reload");
+            prop_assert_eq!(reopened.read_text(reopened_entry).unwrap(), rope.to_string());
+
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    // Feature: pro-writer-10-star, Property 12: Auto-prune keeps the newest N automatic snapshots and never a manual one
+    // Validates: Requirements 4.2
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn auto_prune_keeps_newest_automatic_snapshots_and_all_manual_snapshots(
+            sequence in prop::collection::vec(any::<bool>(), 1..=16),
+            keep in 0usize..=20,
+        ) {
+            let dir = scratch_dir("property-12");
+            let mut store = SnapshotStore::in_dir(dir.clone());
+            let mut captured = Vec::with_capacity(sequence.len());
+
+            for (index, automatic) in sequence.iter().copied().enumerate() {
+                let text = format!("snapshot-{index}");
+                let entry = if automatic {
+                    store.capture_auto(&Rope::from_str(&text)).unwrap()
+                } else {
+                    store
+                        .capture(&Rope::from_str(&text), Some(&format!("manual-{index}")))
+                        .unwrap()
+                };
+                captured.push((automatic, entry));
+            }
+
+            let auto_count = sequence.iter().filter(|automatic| **automatic).count();
+            let manual_files = captured
+                .iter()
+                .filter(|(automatic, _)| !automatic)
+                .map(|(_, entry)| entry.file.clone())
+                .collect::<Vec<_>>();
+            let auto_files = captured
+                .iter()
+                .filter(|(automatic, _)| *automatic)
+                .map(|(_, entry)| entry.file.clone())
+                .collect::<Vec<_>>();
+            let expected_auto_count = if keep == 0 {
+                auto_count
+            } else {
+                auto_count.min(keep)
+            };
+            let expected_auto_files = auto_files
+                .iter()
+                .skip(auto_count - expected_auto_count)
+                .cloned()
+                .collect::<Vec<_>>();
+
+            let removed = store.prune_auto(keep).unwrap();
+            let expected_removed = if keep == 0 {
+                0
+            } else {
+                auto_count.saturating_sub(keep)
+            };
+            prop_assert_eq!(removed, expected_removed);
+
+            let actual_manual_files = store
+                .entries()
+                .iter()
+                .filter(|entry| !entry.auto)
+                .map(|entry| entry.file.clone())
+                .collect::<Vec<_>>();
+            let actual_auto_files = store
+                .entries()
+                .iter()
+                .filter(|entry| entry.auto)
+                .map(|entry| entry.file.clone())
+                .collect::<Vec<_>>();
+            prop_assert_eq!(actual_manual_files, manual_files.as_slice());
+            prop_assert_eq!(actual_auto_files.as_slice(), expected_auto_files.as_slice());
+
+            let surviving_files = snapshot_files(&dir);
+            let mut expected_files = manual_files;
+            expected_files.extend(actual_auto_files);
+            expected_files.sort();
+            prop_assert_eq!(surviving_files, expected_files);
+
+            let reopened = SnapshotStore::in_dir(dir.clone());
+            prop_assert_eq!(reopened.entries(), store.entries());
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    // Feature: pro-writer-10-star, Property 13
+    // Validates: Requirements 4.3
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn corrupt_or_missing_index_is_rebuilt_from_snapshot_files(
+            snapshots in prop::collection::vec(
+                (
+                    prop::collection::vec(any::<char>(), 0..=128),
+                    any::<bool>(),
+                    prop::collection::vec(any::<char>(), 0..=48),
+                ),
+                1..=12,
+            ),
+            remove_index in any::<bool>(),
+        ) {
+            let dir = scratch_dir("property-13");
+            let mut store = SnapshotStore::in_dir(dir.clone());
+            let mut expected = Vec::with_capacity(snapshots.len());
+
+            for (index, (text_chars, automatic, label_chars)) in snapshots.into_iter().enumerate() {
+                let text: String = text_chars.into_iter().collect();
+                let label: String = label_chars.into_iter().collect();
+                let rope = Rope::from_str(&text);
+                let entry = if automatic {
+                    store.capture_auto(&rope).unwrap()
+                } else {
+                    store
+                        .capture(&rope, Some(&format!("manual-{index}-{label}")))
+                        .unwrap()
+                };
+                expected.push((entry.file.clone(), text, automatic));
+            }
+
+            let index_path = dir.join(INDEX_FILE);
+            if remove_index {
+                std::fs::remove_file(&index_path).unwrap();
+            } else {
+                std::fs::write(&index_path, b"{ corrupt snapshot index").unwrap();
+            }
+
+            let recovered = SnapshotStore::in_dir(dir.clone());
+            let mut expected_files = expected
+                .iter()
+                .map(|(file, _, _)| file.clone())
+                .collect::<Vec<_>>();
+            expected_files.sort();
+            let mut recovered_files = recovered
+                .entries()
+                .iter()
+                .map(|entry| entry.file.clone())
+                .collect::<Vec<_>>();
+            recovered_files.sort();
+            prop_assert_eq!(recovered_files, expected_files);
+
+            for (file, text, automatic) in expected {
+                let entry = recovered
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.file == file)
+                    .expect("every valid snapshot file is reconciled");
+                prop_assert_eq!(recovered.read_text(entry).unwrap(), text.as_str());
+                prop_assert_eq!(entry.words, prose_words_in_text(&text));
+                prop_assert_eq!(entry.auto, automatic);
+            }
+
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
     #[test]
     fn snapshot_is_plain_text_and_round_trips() {
         let dir = scratch_dir("plain-text");

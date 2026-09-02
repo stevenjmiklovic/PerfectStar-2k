@@ -2191,6 +2191,26 @@ fn navigation_walks_comments_and_the_list_jumps_to_them() {
 }
 
 #[test]
+fn export_success_reports_an_absolute_output_path() {
+    let relative = format!("pstar-export-status-{}.html", std::process::id());
+    let output = std::env::current_dir().unwrap().join(&relative);
+    let _ = std::fs::remove_file(&output);
+
+    let mut app = App::new(None).unwrap();
+    app.splash = false;
+    app.execute(Cmd::ExportHtml);
+    typed(&mut app, &relative);
+    app.handle_key(plain(KeyCode::Enter));
+
+    assert_eq!(
+        app.status_msg.as_deref(),
+        Some(format!("HTML exported to {}", output.display()).as_str())
+    );
+    assert!(output.is_file());
+    let _ = std::fs::remove_file(output);
+}
+
+#[test]
 fn comments_never_reach_an_export() {
     // R9.3. They can't: the text lives in the sidecar, not the document. This
     // guards that no future path smuggles it into the compiled prose.
@@ -2302,6 +2322,27 @@ fn next_style_issue_walks_the_document_like_next_misspelling() {
 }
 
 #[test]
+fn next_style_issue_wraps_from_the_end_to_the_first_issue() {
+    let (dir, _source, mut app) =
+        test_app("style-wrap", "She walked quietly.\nThe door was closed.\n");
+    app.execute(Cmd::ToggleStyle);
+    app.set_cursor(app.buf.len_chars());
+    app.execute(Cmd::NextStyleIssue);
+
+    assert_eq!(
+        app.cursor, 11,
+        "wraparound should return to the first issue"
+    );
+    assert!(
+        app.status_msg.as_ref().unwrap().contains("adverb"),
+        "{:?}",
+        app.status_msg
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn a_clean_document_reports_no_style_issues() {
     let (dir, _source, mut app) = test_app("style-clean", "He took the knife. She left.\n");
     app.execute(Cmd::ToggleStyle);
@@ -2371,6 +2412,27 @@ fn readability_and_overused_words_are_computed_when_the_overlay_opens() {
     let report = app.style_report.clone().unwrap();
     assert!(report.selection);
     assert_eq!(report.readability.sentences, 1);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn readability_overlay_uses_configured_long_sentence_threshold() {
+    // R8.4/R8.7: the overlay must use the configured threshold, not only the
+    // default used by the standalone readability helper.
+    let (dir, _source, mut app) = test_app(
+        "style-threshold",
+        "One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty one. Short sentence.\n",
+    );
+    app.style.checks.sentence_words = 20;
+
+    app.execute(Cmd::StatsOverlay);
+
+    let report = app
+        .style_report
+        .clone()
+        .expect("the overlay computes figures");
+    assert_eq!(report.readability.long_sentence_percent, 50.0);
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -3043,53 +3105,45 @@ fn autocorrect_fires_on_separator_and_one_undo_restores_typed_text() {
 }
 
 #[test]
-fn smart_typography_curly_quotes_em_dash_ellipsis() {
-    // R10.6: typing straight quotes → curly, -- → em dash, ... → ellipsis.
-    let (_dir, _source, mut app) = test_app("typo-smart", "");
-
-    // Curly double quotes.
-    for c in "\"hi\"".chars() {
-        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+fn each_smart_typography_substitution_is_one_undoable_edit() {
+    // R10.6: each straight-typography substitution is recorded as one edit,
+    // so an immediate undo restores the characters typed before substitution.
+    let (_dir, _source, mut quotes) = test_app("typo-quotes", "");
+    for c in "\"".chars() {
+        quotes.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
     }
+    assert_eq!(quotes.buf.rope.to_string(), "\u{201C}");
+    quotes.execute(Cmd::Undo);
     assert_eq!(
-        app.buf.rope.to_string(),
-        "\u{201C}hi\u{201D}",
-        "straight quotes should become curly"
+        quotes.buf.rope.to_string(),
+        "\"",
+        "one undo should restore a straight quote"
     );
 
-    // Each quote substitution is one undo (the open quote, "h", "i", close quote).
-    // Undo the close quote.
-    app.execute(Cmd::Undo);
-    // The close-quote was replaced with the glyph as one edit; undoing it
-    // removes that glyph.
-    let text = app.buf.rope.to_string();
-    assert!(
-        !text.ends_with('\u{201D}'),
-        "undo should revert the curly close quote"
+    let (_dir2, _source2, mut dash) = test_app("typo-dash", "wait");
+    dash.set_cursor(4);
+    for c in "--".chars() {
+        dash.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert_eq!(dash.buf.rope.to_string(), "wait\u{2014}");
+    dash.execute(Cmd::Undo);
+    assert_eq!(
+        dash.buf.rope.to_string(),
+        "wait-",
+        "one undo should restore the second typed hyphen"
     );
 
-    // Start fresh for em-dash test.
-    let (_dir2, _source2, mut app2) = test_app("typo-dash", "wait");
-    app2.set_cursor(4);
-    for c in "--stop".chars() {
-        app2.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    let (_dir3, _source3, mut ellipsis) = test_app("typo-ellipsis", "er");
+    ellipsis.set_cursor(2);
+    for c in "...".chars() {
+        ellipsis.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
     }
+    assert_eq!(ellipsis.buf.rope.to_string(), "er\u{2026}");
+    ellipsis.execute(Cmd::Undo);
     assert_eq!(
-        app2.buf.rope.to_string(),
-        "wait\u{2014}stop",
-        "double hyphen should become em dash"
-    );
-
-    // Start fresh for ellipsis test.
-    let (_dir3, _source3, mut app3) = test_app("typo-ellipsis", "er");
-    app3.set_cursor(2);
-    for c in "...um".chars() {
-        app3.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
-    }
-    assert_eq!(
-        app3.buf.rope.to_string(),
-        "er\u{2026}um",
-        "triple period should become ellipsis"
+        ellipsis.buf.rope.to_string(),
+        "er..",
+        "one undo should restore the two periods consumed by ellipsis"
     );
 }
 
@@ -3126,20 +3180,25 @@ fn autocorrect_respects_config_flag() {
 }
 
 #[test]
-fn unavailable_lookup_posts_status_and_does_not_open_overlay() {
-    // R10.7: if the lookup resource is unavailable, post a non-blocking message.
+fn unavailable_lookup_disables_each_command_without_error() {
+    // R10.7: an unavailable resource leaves lookup commands inert while
+    // reporting a non-blocking status message naming the missing resource.
     let (_dir, _source, mut app) = test_app("lookup-unavail", "hello world\n");
     app.set_cursor(2);
-    // Force the resource to be Unavailable.
     app.lookup = lookup::LookupResource::from_str("");
 
-    app.execute(Cmd::Thesaurus);
-    assert!(matches!(app.mode, Mode::Normal), "overlay must not open");
-    assert!(
-        app.status_msg.as_deref().unwrap().contains("unavailable"),
-        "got {:?}",
-        app.status_msg
-    );
+    for command in [Cmd::Thesaurus, Cmd::Define] {
+        app.execute(command);
+        assert!(
+            matches!(app.mode, Mode::Normal),
+            "{command:?} must remain disabled when lookup is unavailable"
+        );
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("thesaurus unavailable: resource contains no entries"),
+            "{command:?} should report the unavailable resource, not an error"
+        );
+    }
 }
 
 // --- Phase 14: discoverability — help levels and first-use hints (R12) ----
